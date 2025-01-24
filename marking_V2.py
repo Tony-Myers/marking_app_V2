@@ -78,7 +78,7 @@ def parse_csv_section(csv_text):
         required_columns = {'criterion', 'score', 'comment'}
         missing = required_columns - set(df.columns)
         if missing:
-            st.error(f"Missing columns: {', '.join(missing)}")
+            st.error(f"Missing columns in CSV: {', '.join(missing)}")
             return None
         return df
     except Exception as e:
@@ -90,21 +90,36 @@ def parse_api_response(response):
         # Normalize response format
         normalized = response.replace('\r\n', '\n').lower()
         
-        # Extract CSV section using regex
-        csv_match = re.search(r'criterion,score,comment(.*?)overall comments:', normalized, re.DOTALL)
-        comments_match = re.search(r'overall comments:(.*?)feedforward:', normalized, re.DOTALL)
-        feedforward_match = re.search(r'feedforward:(.*)', normalized, re.DOTALL)
+        # Extract CSV section using more robust regex
+        csv_match = re.search(
+            r'(?:^|\n)criterion,score,comment\n(.*?)(?=\noverall comments:|\nfeedforward:|\Z)', 
+            normalized, 
+            re.DOTALL
+        )
+        
+        # Extract comments and feedforward with more flexible matching
+        comments_match = re.search(
+            r'(?:overall comments:?\s*)(.*?)(?=\nfeedforward:|\Z)', 
+            normalized, 
+            re.DOTALL
+        )
+        feedforward_match = re.search(
+            r'(?:feedforward:?\s*)(.*)', 
+            normalized, 
+            re.DOTALL
+        )
 
         if not all([csv_match, comments_match, feedforward_match]):
             raise ValueError("Missing required sections in response")
 
         return {
-            'csv': f"Criterion,Score,Comment{csv_match.group(1).strip()}",
+            'csv': f"Criterion,Score,Comment\n{csv_match.group(1).strip()}",
             'comments': comments_match.group(1).strip(),
             'feedforward': feedforward_match.group(1).strip()
         }
     except Exception as e:
         st.error(f"Response parsing failed: {str(e)}")
+        st.text_area("Raw API Response", response, height=300)
         return None
 
 def extract_weight(criterion_name):
@@ -187,11 +202,9 @@ def main():
     st.header("Assignment Configuration")
     assignment_task = st.text_area("Assignment Task & Academic Level", height=150)
     
-    
     st.header("Upload Files")
-    rubric_file = st.file_uploader("Rubric (CSV)", type=['csv'])  # Corrected here
+    rubric_file = st.file_uploader("Rubric (CSV)", type=['csv'])
     submissions = st.file_uploader("Student Submissions", type=ALLOWED_EXTENSIONS, accept_multiple_files=True)
-    
     
     if rubric_file and submissions and st.button("Start Marking"):
         try:
@@ -222,43 +235,44 @@ def main():
                 if count_tokens(text) > MAX_TOKENS * 0.6:
                     text = truncate_text(text, int(MAX_TOKENS * 0.6))
                 
-                # Prepare prompts
+                # Prepare prompts with strict formatting requirements
                 system_prompt = f"""You are an experienced UK academic. Provide feedback using:
 - British English spelling
 - Birmingham Newman University guidelines
-- Strict adherence to rubric criteria
-- Second person narrative
-- 150 word limits for comments"""
-                
-                user_prompt = f"""
-**Generate feedback in EXACTLY this format:**
+- Strict CSV format with Criterion,Score,Comment columns
+- Scores between 0-100
+- 150 word limits for comments
+- Mandatory sections: CSV, Overall Comments, Feedforward"""
 
-===RUBRIC_START===
+                user_prompt = f"""
+Generate feedback in EXACTLY this format:
+
+---CSV_START---
 Criterion,Score,Comment
 "Linking Theory",75,"Good analysis but needs more depth"
 "Application of Theory",65,"Adequate but lacks critical engagement"
 ...
-===RUBRIC_END===
+---CSV_END---
 
-===COMMENTS_START===
+---COMMENTS_START---
 Overall Comments:
 Your essay demonstrates... (150 words max)
-===COMMENTS_END===
+---COMMENTS_END---
 
-===FEEDFORWARD_START===
+---FEEDFORWARD_START---
 Feedforward:
 - Improve critical analysis
 - Strengthen theoretical links
 - Enhance referencing
-===FEEDFORWARD_END===
+---FEEDFORWARD_END---
 
-**Actual Submission Content:**
+Submission Content:
 {text[:10000]}
 
-**Rubric Criteria:**
+Rubric Criteria:
 {criteria_string}
 
-**Assignment Task:**
+Assignment Task:
 {assignment_task}
 """
                 # API Call
@@ -275,7 +289,8 @@ Feedforward:
                 # Process scores
                 scores_df = parse_csv_section(parsed['csv'])
                 if scores_df is None or scores_df.empty:
-                    st.error("Invalid scores data")
+                    st.error("Invalid scores data - check CSV formatting")
+                    st.text_area("Raw CSV Data", parsed['csv'], height=200)
                     continue
                 
                 # Merge dataframes
