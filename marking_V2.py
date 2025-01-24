@@ -8,94 +8,31 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import nsdecls
 from io import BytesIO
 from PyPDF2 import PdfReader
-from pptx import Presentation
 import re
+import tiktoken
+import os
+import csv
 
 # Configuration
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-ALLOWED_EXTENSIONS = ["docx", "pdf", "pptx"]
+ALLOWED_EXTENSIONS = ["docx", "pdf"]
+MAX_TOKENS = 7000
+PROMPT_BUFFER = 1000
 
-def set_document_format(doc):
-    """Configure document layout with correct margins and font"""
-    section = doc.sections[0]
-    section.page_width = Inches(11.69)
-    section.page_height = Inches(8.27)
-    
-    # Set margins to 2cm
-    margins = Inches(0.79)
-    section.top_margin = margins
-    section.bottom_margin = margins
-    section.left_margin = margins
-    section.right_margin = margins
-    
-    # Set default font
-    style = doc.styles['Normal']
-    font = style.font
-    font.name = 'Calibri'
-    font.size = Pt(12)
+# Initialize encoding
+try:
+    encoding = tiktoken.encoding_for_model("deepseek-chat")
+except KeyError:
+    encoding = tiktoken.get_encoding("cl100k_base")
 
-def read_file_content(uploaded_file) -> str:
-    """Extract text from supported file formats"""
-    content = ""
-    try:
-        file_bytes = BytesIO(uploaded_file.getvalue())
-        if uploaded_file.name.endswith('.docx'):
-            doc = Document(file_bytes)
-            content = "\n".join([para.text for para in doc.paragraphs])
-        elif uploaded_file.name.endswith('.pdf'):
-            reader = PdfReader(file_bytes)
-            content = "\n".join([page.extract_text() or "" for page in reader.pages])
-        elif uploaded_file.name.endswith('.pptx'):
-            prs = Presentation(file_bytes)
-            for slide in prs.slides:
-                for shape in slide.shapes:
-                    if hasattr(shape, "text"):
-                        content += shape.text + "\n"
-        return content.strip()
-    except Exception as e:
-        st.error(f"Error reading {uploaded_file.name}: {str(e)}")
-        raise
+def count_tokens(text):
+    return len(encoding.encode(text))
 
-def process_rubric(uploaded_file):
-    """Process and validate rubric CSV"""
-    try:
-        df = pd.read_csv(uploaded_file)
-        df = df.dropna(how='all', axis=0).reset_index(drop=True)
-        df.columns = [col.strip() for col in df.columns]
+def truncate_text(text, max_tokens):
+    tokens = encoding.encode(text)
+    return encoding.decode(tokens[:max_tokens]) if len(tokens) > max_tokens else text
 
-        required_columns = [
-            'Criteria', 'Criteria weighting', '80-100%', '70-79%',
-            '60-69%', '50-59%', '40-49%', '0-39%',
-            'Criteria Score', 'Brief Comment'
-        ]
-        
-        missing = [col for col in required_columns if col not in df.columns]
-        if missing:
-            raise ValueError(f"Missing columns: {', '.join(missing)}")
-
-        df['Weighting'] = (df['Criteria weighting']
-                           .astype(str)
-                           .str.replace('%', '')
-                           .astype(float) / 100)
-        
-        total_weight = round(df['Weighting'].sum(), 2)
-        if total_weight != 1.0:
-            raise ValueError(f"Total weighting must be 100% (current: {total_weight*100}%)")
-
-        return df.fillna('')
-
-    except Exception as e:
-        st.error(f"Rubric Error: {str(e)}")
-        st.markdown("""
-        **Required CSV Format:**
-        - Maintain all original columns even if empty
-        - Preserve exact column names and order
-        - Include Criteria Score and Brief Comment columns
-        """)
-        st.stop()
-
-def call_deepseek_api(prompt: str, system_prompt: str) -> str:
-    """Execute API call with error handling"""
+def call_deepseek_api(prompt, system_prompt):
     headers = {
         "Authorization": f"Bearer {st.secrets['DEEPSEEK_API_KEY']}",
         "Content-Type": "application/json"
@@ -107,254 +44,216 @@ def call_deepseek_api(prompt: str, system_prompt: str) -> str:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
         ],
-        "temperature": 0.2,
+        "temperature": 0.3,
         "max_tokens": 3000
     }
     
     try:
         response = requests.post(DEEPSEEK_API_URL, json=data, headers=headers)
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
-    except requests.exceptions.RequestException as err:
-        st.error(f"API Error: {err}\nResponse: {response.text if response else 'No response'}")
-        raise
-
-def calculate_overall_score(rubric_df):
-    """Compute weighted total score"""
-    try:
-        rubric_df['Numerical Score'] = (rubric_df['Criteria Score']
-                                        .str.extract(r'(\d+)', expand=False)
-                                        .astype(float))
-        total = (rubric_df['Numerical Score'] * rubric_df['Weighting']).sum()
-        return min(max(round(total, 1), 0), 100)
+        return response.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        st.error(f"Score calculation error: {str(e)}")
-        return 0.0
+        st.error(f"API Error: {str(e)}")
+        return None
+
+def extract_text_from_docx(file):
+    try:
+        doc = Document(file)
+        return '\n'.join([para.text for para in doc.paragraphs])
+    except Exception as e:
+        st.error(f"DOCX Error: {str(e)}")
+        return None
+
+def extract_text_from_pdf(file):
+    try:
+        reader = PdfReader(file)
+        return '\n'.join([page.extract_text() for page in reader.pages])
+    except Exception as e:
+        st.error(f"PDF Error: {str(e)}")
+        return None
+
+def parse_csv_section(csv_text):
+    try:
+        return pd.read_csv(StringIO(csv_text), quotechar='"', skipinitialspace=True)
+    except Exception as e:
+        st.error(f"CSV Parse Error: {str(e)}")
+        return None
+
+def extract_weight(criterion_name):
+    match = re.search(r'\((\d+)%\)', criterion_name)
+    return float(match.group(1)) if match else 0.0
 
 def add_shading(cell):
-    """Add light green shading to a table cell"""
     shading = OxmlElement('w:shd')
-    shading.set(nsdecls('w'), 'fill', '90EE90')
+    shading.set(nsdecls('w'), 'fill', 'D9EAD3')
     cell._tc.get_or_add_tcPr().append(shading)
 
-def generate_feedback_document(rubric_df: pd.DataFrame, overall_comments: str, feedforward: str, overall_score: float) -> bytes:
-    """Generate formatted feedback document with all elements"""
-    try:
-        doc = Document()
-        set_document_format(doc)
-        
-        # Header
-        header = doc.add_heading('Student Feedback', 0)
-        header.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
-        # Student info table
-        info_table = doc.add_table(rows=1, cols=2)
-        info_table.style = 'Table Grid'
-        info_row = info_table.rows[0].cells
-        info_row[0].text = "Student Name:\nSubmission Date:\nCourse:"
-        info_row[1].text = "[Name]\n[Date]\n[Course]"
-
-        # Rubric table
-        doc.add_heading('Assessment Rubric', 1)
-        cols = [
-            'Criteria', 'Criteria weighting', '80-100%', '70-79%',
-            '60-69%', '50-59%', '40-49%', '0-39%', 
-            'Criteria Score', 'Brief Comment'
-        ]
-        
-        table = doc.add_table(rows=1, cols=len(cols))
-        table.style = 'Table Grid'
-        table.autofit = False
-
-        # Set column widths
-        col_widths = [Inches(1.5), Inches(0.7)] + [Inches(1.2)]*6 + [Inches(0.7), Inches(1.5)]
-        for i, width in enumerate(col_widths):
-            table.columns[i].width = width
-
-        # Header row
-        header_row = table.rows[0]
-        for i, col in enumerate(cols):
-            cell = header_row.cells[i]
-            cell.text = col
-            cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-            cell.paragraphs[0].runs[0].font.bold = True
-
-        # Data rows with shading
-        for _, row in rubric_df.iterrows():
-            new_row = table.add_row().cells
-            for i, col in enumerate(cols):
-                cell = new_row[i]
-                cell.text = str(row[col])
-                if col in ['Criteria Score', 'Brief Comment'] and str(row[col]).strip():
-                    add_shading(cell)
-
-        # Overall score section
-        doc.add_heading('Overall Mark', 1)
-        score_para = doc.add_paragraph()
-        score_run = score_para.add_run(f"Final Grade: {overall_score}%")
-        score_run.bold = True
-        score_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-        # Feedback sections
-        sections = [
-            ('Overall Comments', overall_comments),
-            ('Feedforward Suggestions', feedforward)
-        ]
-        
-        for section, content in sections:
-            doc.add_heading(section, 1)
-            if section == 'Feedforward Suggestions':
-                for point in filter(None, content.split('\n')):
-                    doc.add_paragraph(point.strip(), style='ListBullet')
-            else:
-                p = doc.add_paragraph()
-                p.add_run(content.strip())
-
-        buffer = BytesIO()
-        doc.save(buffer)
-        buffer.seek(0)
-        return buffer.getvalue()
-    except Exception as e:
-        st.error(f"Document generation failed: {str(e)}")
-        raise
+def generate_feedback_doc(student_name, rubric_df, overall_comments, feedforward, total_mark):
+    doc = Document()
+    section = doc.sections[0]
+    section.orientation = WD_ORIENT.LANDSCAPE
+    section.page_width = Inches(11.69)
+    section.page_height = Inches(8.27)
+    
+    # Header
+    doc.add_heading(f"Feedback for {student_name}", 0).alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    # Rubric Table
+    table = doc.add_table(rows=1, cols=len(rubric_df.columns))
+    table.style = 'Table Grid'
+    
+    # Header row
+    hdr_cells = table.rows[0].cells
+    for i, col in enumerate(rubric_df.columns):
+        hdr_cells[i].text = str(col)
+        hdr_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    # Data rows with shading
+    for _, row in rubric_df.iterrows():
+        row_cells = table.add_row().cells
+        for i, value in enumerate(row):
+            cell = row_cells[i]
+            cell.text = str(value)
+            if 'Score' in rubric_df.columns[i]:
+                try:
+                    score = float(value)
+                    for range_col in [col for col in rubric_df.columns if '-' in col and '%' in col]:
+                        lower, upper = map(float, range_col.replace('%','').split('-'))
+                        if lower <= score <= upper:
+                            add_shading(cell)
+                            break
+                except ValueError:
+                    pass
+    
+    # Feedback sections
+    doc.add_heading('Overall Comments', 1)
+    doc.add_paragraph(overall_comments)
+    
+    doc.add_heading('Feedforward', 1)
+    for point in feedforward.split('\n'):
+        if point.strip().startswith('-'):
+            doc.add_paragraph(point.strip()[2:], style='ListBullet')
+    
+    doc.add_heading('Total Mark', 1)
+    doc.add_paragraph(f"{total_mark:.2f}%").bold = True
+    
+    buffer = BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
 
 def main():
     st.set_page_config(page_title="AutoGrader Pro", layout="wide")
-    st.title("📚 Automated Assignment Grading System")
+    st.title("✏️ Automated Assignment Grading © Tony Myers (DeepSeek Version)")
     
     # Authentication
     if 'authenticated' not in st.session_state:
-        with st.container():
-            password = st.text_input("Enter password:", type='password')
-            if st.button("Authenticate"):
-                if password == st.secrets["APP_PASSWORD"]:
-                    st.session_state.authenticated = True
-                    st.rerun()
-                else:
-                    st.error("Incorrect password")
+        password = st.text_input("Enter password:", type="password")
+        if st.button("Authenticate") and password == st.secrets["APP_PASSWORD"]:
+            st.session_state.authenticated = True
+            st.rerun()
         return
     
-    # Main interface
-    with st.sidebar:
-        st.header("⚙️ Configuration")
-        rubric_file = st.file_uploader("Upload Rubric CSV", type=['csv'])
-        assignment_task = st.text_area("Assignment Description", height=150)
-        level = st.selectbox("Academic Level", [
-            "Undergraduate Level 4", "Undergraduate Level 5", 
-            "Undergraduate Level 6", "Masters Level 7", "PhD Level 8"
-        ])
+    st.header("Assignment Configuration")
+    assignment_task = st.text_area("Assignment Task & Level", height=150)
     
-    st.header("📤 Student Submissions")
-    student_files = st.file_uploader(
-        "Upload Assignments",
-        type=ALLOWED_EXTENSIONS,
-        accept_multiple_files=True
-    )
+    st.header("Upload Files")
+    rubric_file = st.file_uploader("Rubric (CSV)", type=['csv'])
+    submissions = st.file_uploader("Submissions", type=ALLOWED_EXTENSIONS, accept_multiple_files=True)
     
-    if rubric_file and student_files and st.button("🚀 Start Grading"):
+    if rubric_file and submissions and st.button("Start Marking"):
         try:
-            rubric_df = process_rubric(rubric_file)
+            rubric_df = pd.read_csv(rubric_file)
+            rubric_df['Criterion'] = rubric_df['Criterion'].astype(str)
+            rubric_df['Weight'] = rubric_df['Criterion'].apply(extract_weight)
+            rubric_df['Criterion'] = rubric_df['Criterion'].apply(lambda x: re.sub(r'\s*\(\d+%\)', '', x))
             
-            for uploaded_file in student_files:
-                with st.expander(f"Processing {uploaded_file.name}", expanded=True):
-                    try:
-                        content = read_file_content(uploaded_file)
-                        
-                        system_prompt = f"""
-                        As an academic assessor, evaluate using:
-                        - Level: {level}
-                        - Task: {assignment_task}
-                        - Rubric:
-                        {rubric_df.to_csv(index=False)}
-                        
-                        Required Format:
-                        SCORES:
-                        - [Criterion Name]: [Selected Band], [Score%], [Comment]
-                        OVERALL_COMMENTS:
-                        [Comprehensive evaluation in 3-5 paragraphs]
-                        FEEDFORWARD:
-                        - [Actionable suggestion 1]
-                        - [Actionable suggestion 2]
-                        - [Actionable suggestion 3]
-                        """
-                        
-                        user_prompt = f"""
-                        Submission Content:
-                        {content[:10000]}
+            percentage_columns = [col for col in rubric_df.columns if '%' in col]
+            criteria_string = '\n'.join(rubric_df['Criterion'].tolist())
+            
+            for submission in submissions:
+                student_name = os.path.splitext(submission.name)[0]
+                
+                # Extract text
+                if submission.type == "application/pdf":
+                    text = extract_text_from_pdf(submission)
+                else:
+                    text = extract_text_from_docx(submission)
+                
+                if not text:
+                    continue
+                
+                # Truncate if needed
+                if count_tokens(text) > MAX_TOKENS * 0.6:
+                    text = truncate_text(text, int(MAX_TOKENS * 0.6))
+                
+                # Prepare prompts
+                system_prompt = f"""
+You are an experienced UK academic. Provide strict, rigorous feedback using:
+- British English spelling
+- Birmingham Newman University referencing guidelines
+- Second person narrative
+- UK undergraduate standards
+"""
+                user_prompt = f"""
+**Assignment Task:** {assignment_task}
+**Student Submission:** {text}
+**Rubric Criteria:** {criteria_string}
 
-                        Analysis Guidelines:
-                        1. Match exact percentage band descriptors
-                        2. Provide specific examples from the text
-                        3. Maintain academic rigor in feedback
-                        4. Use British English spelling
-                        5. Reference university guidelines where appropriate
-                        """
-                        
-                        with st.spinner("Generating detailed feedback..."):
-                            response = call_deepseek_api(user_prompt, system_prompt)
-                        
-                        # Enhanced response parsing
-                        scores = {}
-                        sections = {
-                            'SCORES:': 'scores',
-                            'OVERALL_COMMENTS:': 'overall',
-                            'FEEDFORWARD:': 'feedforward'
-                        }
-                        current_section = None
-                        overall_comments = []
-                        feedforward = []
+Generate feedback with:
+1. CSV section starting with 'Criterion,Score,Comment'
+2. Overall Comments (150 words max)
+3. Feedforward (bullet points, 150 words max)
+4. Strict adherence to rubric percentages
 
-                        for line in response.split('\n'):
-                            line = line.strip()
-                            if line in sections:
-                                current_section = sections[line]
-                            elif current_section == 'scores' and line.startswith('-'):
-                                match = re.match(r"- (.+?): (.+?), (\d+)%, (.+)", line)
-                                if match:
-                                    criterion, band, score, comment = match.groups()
-                                    scores[criterion.strip()] = {
-                                        'Criteria Score': f"{score}%",
-                                        'Brief Comment': comment.strip()
-                                    }
-                            elif current_section == 'overall':
-                                if line:  # Skip empty lines
-                                    overall_comments.append(line)
-                            elif current_section == 'feedforward' and line.startswith('-'):
-                                feedforward.append(line[2:].strip())
+**Example Format:**
+Criterion,Score,Comment
+"Linking Theory",75,"Good but needs more critical analysis"
+...
 
-                        # Update rubric dataframe
-                        rubric_df['Criteria Score'] = ''
-                        rubric_df['Brief Comment'] = ''
-                        for criterion, data in scores.items():
-                            mask = rubric_df['Criteria'].str.strip().str.lower() == criterion.strip().lower()
-                            if mask.any():
-                                idx = rubric_df[mask].index[0]
-                                rubric_df.at[idx, 'Criteria Score'] = data['Criteria Score']
-                                rubric_df.at[idx, 'Brief Comment'] = data['Brief Comment']
+Overall Comments:
+Your essay demonstrates... 
 
-                        # Calculate overall score
-                        overall_score = calculate_overall_score(rubric_df)
-                        
-                        # Generate document
-                        feedback_doc = generate_feedback_document(
-                            rubric_df,
-                            "\n".join(overall_comments).strip(),
-                            "\n".join(feedforward),
-                            overall_score
-                        )
-                        
-                        st.download_button(
-                            label=f"📥 Download Feedback - {uploaded_file.name}",
-                            data=feedback_doc,
-                            file_name=f"feedback_{uploaded_file.name.split('.')[0]}.docx",
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                        )
-                    
-                    except Exception as e:
-                        st.error(f"Processing failed for {uploaded_file.name}: {str(e)}")
+Feedforward:
+- Improve critical analysis
+- Strengthen theoretical links
+...
+"""
+                # API Call
+                response = call_deepseek_api(user_prompt, system_prompt)
+                if not response:
+                    continue
+                
+                # Parse response
+                csv_part = response.split('Overall Comments:')[0].strip()
+                comments_part = response.split('Overall Comments:')[1].split('Feedforward:')
+                overall_comments = comments_part[0].strip()
+                feedforward = comments_part[1].strip()
+                
+                # Process scores
+                scores_df = parse_csv_section(csv_part)
+                merged_df = rubric_df.merge(scores_df, on='Criterion', how='left')
+                merged_df['Weighted'] = merged_df['Weight'] * merged_df['Score'] / 100
+                total_mark = merged_df['Weighted'].sum()
+                
+                # Generate document
+                doc_buffer = generate_feedback_doc(
+                    student_name,
+                    merged_df[['Criterion'] + percentage_columns + ['Score', 'Comment']],
+                    overall_comments,
+                    feedforward,
+                    total_mark
+                )
+                
+                st.download_button(
+                    label=f"Download {student_name} Feedback",
+                    data=doc_buffer,
+                    file_name=f"{student_name}_feedback.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
 
         except Exception as e:
-            st.error(f"Grading process failed: {str(e)}")
+            st.error(f"Processing Error: {str(e)}")
 
 if __name__ == "__main__":
     main()
