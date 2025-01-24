@@ -49,52 +49,51 @@ def read_file_content(uploaded_file) -> str:
         raise
 
 def process_rubric(uploaded_file):
-    """Process and validate rubric CSV with enhanced error handling"""
+    """Process rubric with separate weighting column"""
     try:
         # Read and clean CSV
         df = pd.read_csv(uploaded_file, skip_blank_lines=True)
         df = df.dropna(how='all', axis=0).dropna(how='all', axis=1)
-        
-        # Validate minimum columns
-        if 'Criteria' not in df.columns:
-            raise ValueError("CSV must contain 'Criteria' column")
-            
-        # Extract weighting and max score from criteria names
-        criteria_extract = df['Criteria'].str.extract(r'\((\d+)\s*%\)', expand=False)
-        if criteria_extract.isna().any():
-            raise ValueError("All criteria must contain weighting percentage in parentheses (e.g. 'Criteria Name (15%)')")
-            
-        df['Weighting'] = criteria_extract.astype(float)
-        df['Max Score'] = df['Weighting'] / 100
-        df['Criteria'] = df['Criteria'].str.replace(r'\s*\(\d+\s*%\)', '', regex=True)
-        
-        # Rename columns dynamically
-        expected_columns = [
-            'Criteria', '80-100%', '70-79%', '60-69%', '50-59%',
-            '40-49%', '0-39%', 'Score', 'Comment', 'Weighting', 'Max Score'
-        ]
-        
-        # Keep only relevant columns and rename
-        df = df.iloc[:, :len(expected_columns)]
-        df.columns = expected_columns[:len(df.columns)]
-        
-        # Ensure required columns exist
-        required_columns = ['Criteria', 'Weighting', 'Max Score']
+        df.columns = [col.strip() for col in df.columns]
+
+        # Validate required columns
+        required_columns = ['Criteria', 'Criteria weighting']
         missing = [col for col in required_columns if col not in df.columns]
         if missing:
             raise ValueError(f"Missing columns: {', '.join(missing)}")
-            
-        return df
+
+        # Process weighting column
+        if df['Criteria weighting'].dtype == object:
+            df['Weighting'] = df['Criteria weighting'].str.replace('%', '').astype(float) / 100
+        else:
+            df['Weighting'] = df['Criteria weighting'].astype(float)
+
+        # Validate weighting sum
+        total_weight = round(df['Weighting'].sum(), 2)
+        if total_weight != 1.0:
+            raise ValueError(f"Total weighting must be 100% (current: {total_weight*100}%)")
+
+        # Add max score column
+        df['Max Score'] = (df['Weighting'] * 100).astype(int)
         
+        return df
+
     except Exception as e:
         st.error(f"Rubric Error: {str(e)}")
         st.markdown("""
         **Required CSV Format:**
-        - First column: Criteria (must contain weighting in parentheses, e.g. "Theory Application (15%)")
-        - Next 6 columns: Percentage bands (80-100%, 70-79%, etc.)
-        - Subsequent columns: Score, Comment
-        - Final columns: Weighting (auto-generated), Max Score (auto-generated)
+        - Must contain columns: 'Criteria', 'Criteria weighting'
+        - Weighting can be:
+          - Decimals (e.g., 0.15) summing to 1.0
+          - Percentages (e.g., 15%) summing to 100%
+        - Example structure:
         """)
+        st.table(pd.DataFrame({
+            'Criteria': ['Theory Application', 'Research Quality'],
+            'Criteria weighting': ['15%', 0.15],
+            '80-100%': ['Excellent...', 'Outstanding...'],
+            '70-79%': ['Good...', 'Strong...']
+        }))
         st.stop()
         raise
 
@@ -127,8 +126,8 @@ def calculate_overall_score(rubric_df):
     """Compute weighted total score"""
     try:
         rubric_df['Numerical Score'] = rubric_df['Score'].str.extract(r'(\d+)').astype(float)
-        total = (rubric_df['Numerical Score'] * rubric_df['Weighting']).sum() / 100
-        return round(total, 2)
+        total = (rubric_df['Numerical Score'] * rubric_df['Weighting']).sum()
+        return round(total, 1)
     except Exception as e:
         st.error(f"Score calculation error: {str(e)}")
         return 0.0
@@ -141,7 +140,7 @@ def generate_feedback_document(rubric_df: pd.DataFrame, overall_comments: str, f
         
         # Rubric table
         doc.add_heading('Assessment Rubric', 1)
-        cols = ['Criteria', '80-100%', '70-79%', '60-69%', 
+        cols = ['Criteria', 'Weighting', '80-100%', '70-79%', '60-69%', 
                '50-59%', '40-49%', '0-39%', 'Score', 'Comment']
         table = doc.add_table(rows=1, cols=len(cols))
         table.style = 'Table Grid'
