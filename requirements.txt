@@ -4,3 +4,4 @@ python-docx
 PyPDF2
 python-pptx
 requests
+openpyxl
