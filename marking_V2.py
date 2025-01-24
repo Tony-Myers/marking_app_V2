@@ -15,22 +15,21 @@ DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 ALLOWED_EXTENSIONS = ["docx", "pdf", "pptx"]
 
 def set_document_format(doc):
-    """Set document formatting to landscape with 1cm margins and 12pt font"""
+    """Configure document layout and formatting"""
     section = doc.sections[0]
     section.orientation = 1  # Landscape
     section.page_width = Inches(11.69)
     section.page_height = Inches(8.27)
-    section.top_margin = Inches(0.39)  # ~1cm
+    section.top_margin = Inches(0.39)
     section.bottom_margin = Inches(0.39)
     
-    # Set default font
     style = doc.styles['Normal']
     font = style.font
     font.name = 'Calibri'
     font.size = Pt(12)
 
 def read_file_content(uploaded_file) -> str:
-    """Read content from different file formats"""
+    """Extract text from supported file formats"""
     content = ""
     try:
         if uploaded_file.name.endswith('.docx'):
@@ -51,29 +50,52 @@ def read_file_content(uploaded_file) -> str:
         raise
 
 def process_rubric(uploaded_file):
-    """Process percentage-based rubric format with weighting"""
+    """Process and validate rubric CSV with dynamic column handling"""
     try:
-        df = pd.read_csv(uploaded_file, skip_blank_lines=True).dropna(how='all')
-        df = df[df['Criteria'].notna()].reset_index(drop=True)
-        df = df.iloc[:, :10]  # Include weighting column
+        df = pd.read_csv(uploaded_file, skip_blank_lines=True)
+        df = df.dropna(how='all', axis=0).dropna(how='all', axis=1)
         
-        # Extract max score and weighting from criteria name
-        df['Max Score'] = df['Criteria'].str.extract(r'\((\d+)%\)').astype(float) / 100
-        df['Weighting'] = df['Criteria'].str.extract(r'\((\d+)%\)').astype(float)
+        # Extract criteria metadata
+        criteria_mask = df['Criteria'].notna()
+        df = df[criteria_mask].reset_index(drop=True)
+        
+        # Extract max score and weighting
+        criteria_meta = df['Criteria'].str.extract(r'\((\d+)%\)')
+        df['Max Score'] = criteria_meta[0].astype(float) / 100
+        df['Weighting'] = criteria_meta[0].astype(float)
         df['Criteria'] = df['Criteria'].str.replace(r'\s*\(\d+%\)', '', regex=True)
         
-        # Rename columns
-        df.columns = [
-            'Criteria', '80-100%', '70-79%', '60-69%', '50-59%', 
-            '40-49%', '0-39%', 'Score', 'Comment', 'Max Score', 'Weighting'
+        # Dynamically handle columns
+        expected_columns = [
+            'Criteria', '80-100%', '70-79%', '60-69%', '50-59%',
+            '40-49%', '0-39%', 'Score', 'Comment', 'Weighting', 'Max Score'
         ]
+        
+        # Align columns with expected structure
+        df = df.iloc[:, :len(expected_columns)]
+        df.columns = expected_columns[:len(df.columns)]
+        
+        # Validate critical columns
+        required_columns = ['Criteria', '80-100%', 'Weighting', 'Max Score']
+        if not all(col in df.columns for col in required_columns):
+            missing = [col for col in required_columns if col not in df.columns]
+            raise ValueError(f"Missing columns: {', '.join(missing)}")
+            
         return df
+        
     except Exception as e:
-        st.error(f"Error processing rubric: {str(e)}")
+        st.error(f"Rubric processing error: {str(e)}")
+        st.markdown("""
+        **Required CSV format:**
+        - Column 1: Criteria (e.g., "Theory Application (15%)")
+        - Columns 2-7: Percentage bands (80-100%, 70-79%, etc.)
+        - Subsequent columns: Score, Comment
+        - Weighting automatically extracted from criteria names
+        """)
         raise
 
 def call_deepseek_api(prompt: str, system_prompt: str) -> str:
-    """Call DeepSeek API"""
+    """Execute API call with error handling"""
     headers = {
         "Authorization": f"Bearer {st.secrets['DEEPSEEK_API_KEY']}",
         "Content-Type": "application/json"
@@ -98,9 +120,8 @@ def call_deepseek_api(prompt: str, system_prompt: str) -> str:
         raise
 
 def calculate_overall_score(rubric_df):
-    """Calculate weighted overall score"""
+    """Compute weighted total score"""
     try:
-        # Convert scores to numeric values
         rubric_df['Numerical Score'] = rubric_df['Score'].str.extract(r'(\d+)').astype(float)
         total = (rubric_df['Numerical Score'] * rubric_df['Weighting']).sum() / 100
         return round(total, 2)
@@ -114,14 +135,14 @@ def generate_feedback_document(rubric_df: pd.DataFrame, overall_comments: str, f
         doc = Document()
         set_document_format(doc)
         
-        # Add rubric table
+        # Rubric table
         doc.add_heading('Assessment Rubric', 1)
-        cols = ['Criteria', '80-100%', '70-79%', '60-69%', '50-59%', 
-               '40-49%', '0-39%', 'Score', 'Comment']
+        cols = ['Criteria', '80-100%', '70-79%', '60-69%', 
+               '50-59%', '40-49%', '0-39%', 'Score', 'Comment']
         table = doc.add_table(rows=1, cols=len(cols))
         table.style = 'Table Grid'
         
-        # Header row formatting
+        # Header row
         for i, col in enumerate(cols):
             cell = table.cell(0, i)
             cell.text = col
@@ -129,26 +150,26 @@ def generate_feedback_document(rubric_df: pd.DataFrame, overall_comments: str, f
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 paragraph.runs[0].font.bold = True
         
-        # Data rows
+        # Data rows with highlighting
         for _, row in rubric_df.iterrows():
             cells = table.add_row().cells
             for i, col in enumerate(cols):
                 cell = cells[i]
                 cell.text = str(row[col]) if pd.notna(row[col]) else ''
                 
-                # Highlight score and comment cells
+                # Apply green highlight
                 if col in ['Score', 'Comment']:
                     for paragraph in cell.paragraphs:
                         for run in paragraph.runs:
                             run.font.highlight_color = WD_COLOR_INDEX.GREEN
         
-        # Add overall score
+        # Overall score
         overall_score = calculate_overall_score(rubric_df)
         p = doc.add_paragraph()
         p.add_run(f"Overall Score: {overall_score}%").bold = True
         p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
         
-        # Add feedback sections
+        # Feedback sections
         doc.add_heading('Overall Comments', 2)
         doc.add_paragraph(overall_comments)
         
@@ -162,7 +183,7 @@ def generate_feedback_document(rubric_df: pd.DataFrame, overall_comments: str, f
         buffer.seek(0)
         return buffer.getvalue()
     except Exception as e:
-        st.error(f"Error generating document: {str(e)}")
+        st.error(f"Document generation failed: {str(e)}")
         raise
 
 def main():
@@ -172,7 +193,7 @@ def main():
     # Authentication
     if 'authenticated' not in st.session_state:
         with st.container():
-            password = st.text_input("Enter application password:", type='password')
+            password = st.text_input("Enter password:", type='password')
             if st.button("Authenticate"):
                 if password == st.secrets["APP_PASSWORD"]:
                     st.session_state.authenticated = True
@@ -184,29 +205,23 @@ def main():
     # Main interface
     with st.sidebar:
         st.header("⚙️ Configuration")
-        rubric_file = st.file_uploader("📝 Upload Grading Rubric (CSV)", type=['csv'])
-        assignment_task = st.text_area("📋 Assignment Task Description", height=150)
-        level = st.selectbox("🎓 Academic Level", [
+        rubric_file = st.file_uploader("Upload Rubric CSV", type=['csv'])
+        assignment_task = st.text_area("Assignment Description", height=150)
+        level = st.selectbox("Academic Level", [
             "Undergraduate Level 4", "Undergraduate Level 5", 
             "Undergraduate Level 6", "Masters Level 7", "PhD Level 8"
         ])
     
     st.header("📤 Student Submissions")
     student_files = st.file_uploader(
-        "Upload Student Assignments",
+        "Upload Assignments",
         type=ALLOWED_EXTENSIONS,
         accept_multiple_files=True
     )
     
-    if st.button("🚀 Run Automated Grading") and rubric_file and student_files:
+    if st.button("🚀 Start Grading") and rubric_file and student_files:
         try:
             rubric_df = process_rubric(rubric_file)
-            
-            required_columns = ['Criteria', '80-100%', '70-79%', '60-69%',
-                              '50-59%', '40-49%', '0-39%', 'Weighting']
-            if not all(col in rubric_df.columns for col in required_columns):
-                st.error("Invalid rubric format. Please use the template CSV.")
-                return
             
             for uploaded_file in student_files:
                 with st.expander(f"Processing {uploaded_file.name}", expanded=True):
@@ -214,35 +229,33 @@ def main():
                         content = read_file_content(uploaded_file)
                         
                         system_prompt = f"""
-                        As an academic expert, evaluate submissions using this rubric:
-                        
-                        Academic Level: {level}
-                        Assignment Task: {assignment_task}
-                        
-                        Rubric Structure:
+                        As an academic assessor, evaluate using:
+                        - Level: {level}
+                        - Task: {assignment_task}
+                        - Rubric:
                         {rubric_df.to_csv(index=False)}
                         
-                        Required Response Format:
+                        Required Format:
                         SCORES:
-                        - [Criteria Name]: [Selected Band], [Score%]/[Max Score%], [Brief Comment]
+                        - [Criterion]: [Band], [Score%]/[Max%], [Comment]
                         OVERALL_COMMENTS:
-                        [Concise evaluation]
+                        [Evaluation]
                         FEEDFORWARD:
-                        - [Specific improvement suggestion]
+                        - [Suggestion]
                         """
                         
                         user_prompt = f"""
-                        STUDENT SUBMISSION CONTENT:
-                        {content[:10000]}... [truncated if long]
+                        Submission Content:
+                        {content[:10000]}... [truncated]
                         
-                        ANALYSIS INSTRUCTIONS:
-                        1. Match work to specific percentage band descriptors
-                        2. Provide exact percentage scores
-                        3. Include specific examples from the text
-                        4. Maintain academic rigor in comments
+                        Analysis Guidelines:
+                        1. Match exact rubric descriptors
+                        2. Provide percentage scores
+                        3. Reference specific examples
+                        4. Maintain academic standards
                         """
                         
-                        with st.spinner("🔍 Analyzing submission..."):
+                        with st.spinner("Analyzing..."):
                             response = call_deepseek_api(user_prompt, system_prompt)
                         
                         # Parse response
@@ -261,14 +274,11 @@ def main():
                                 current_section = 'feedforward'
                             else:
                                 if current_section == 'scores' and line.startswith('-'):
-                                    parts = re.split(r':\s*', line[2:], 1)
-                                    if len(parts) == 2:
-                                        criterion, rest = parts
-                                        band, score_comment = rest.split(',', 1)
-                                        score, comment = score_comment.split('/', 1)
+                                    match = re.match(r"- (.+?): (.+?), (\d+)%/(\d+)%, (.+)", line)
+                                    if match:
+                                        criterion, band, score, max_score, comment = match.groups()
                                         scores[criterion.strip()] = {
-                                            'Selected Band': band.strip(),
-                                            'Score': score.strip().replace('%', ''),
+                                            'Score': f"{score}%",
                                             'Comment': comment.strip()
                                         }
                                 elif current_section == 'overall':
@@ -280,10 +290,10 @@ def main():
                         for criterion, data in scores.items():
                             mask = rubric_df['Criteria'] == criterion
                             if mask.any():
-                                rubric_df.loc[mask, 'Score'] = f"{data['Score']}%"
+                                rubric_df.loc[mask, 'Score'] = data['Score']
                                 rubric_df.loc[mask, 'Comment'] = data['Comment']
                         
-                        # Generate feedback
+                        # Generate document
                         feedback_doc = generate_feedback_document(
                             rubric_df.fillna(''),
                             "\n".join(overall_comments).strip(),
@@ -291,17 +301,17 @@ def main():
                         )
                         
                         st.download_button(
-                            label=f"📥 Download Feedback for {uploaded_file.name}",
+                            label=f"Download Feedback - {uploaded_file.name}",
                             data=feedback_doc,
                             file_name=f"feedback_{uploaded_file.name.split('.')[0]}.docx",
                             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                         )
                     
                     except Exception as e:
-                        st.error(f"Error processing {uploaded_file.name}: {str(e)}")
+                        st.error(f"Processing failed: {str(e)}")
         
         except Exception as e:
-            st.error(f"System error: {str(e)}")
+            st.error(f"Grading error: {str(e)}")
 
 if __name__ == "__main__":
     main()
