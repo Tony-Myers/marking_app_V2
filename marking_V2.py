@@ -4,7 +4,6 @@ import requests
 from docx import Document
 from docx.enum.text import WD_COLOR_INDEX, WD_ALIGN_PARAGRAPH
 from docx.shared import Pt, Inches
-from docx.oxml.shared import qn
 from io import BytesIO
 from PyPDF2 import PdfReader
 from pptx import Presentation
@@ -50,48 +49,53 @@ def read_file_content(uploaded_file) -> str:
         raise
 
 def process_rubric(uploaded_file):
-    """Process and validate rubric CSV with dynamic column handling"""
+    """Process and validate rubric CSV with enhanced error handling"""
     try:
+        # Read and clean CSV
         df = pd.read_csv(uploaded_file, skip_blank_lines=True)
         df = df.dropna(how='all', axis=0).dropna(how='all', axis=1)
         
-        # Extract criteria metadata
-        criteria_mask = df['Criteria'].notna()
-        df = df[criteria_mask].reset_index(drop=True)
+        # Validate minimum columns
+        if 'Criteria' not in df.columns:
+            raise ValueError("CSV must contain 'Criteria' column")
+            
+        # Extract weighting and max score from criteria names
+        criteria_extract = df['Criteria'].str.extract(r'\((\d+)\s*%\)', expand=False)
+        if criteria_extract.isna().any():
+            raise ValueError("All criteria must contain weighting percentage in parentheses (e.g. 'Criteria Name (15%)')")
+            
+        df['Weighting'] = criteria_extract.astype(float)
+        df['Max Score'] = df['Weighting'] / 100
+        df['Criteria'] = df['Criteria'].str.replace(r'\s*\(\d+\s*%\)', '', regex=True)
         
-        # Extract max score and weighting
-        criteria_meta = df['Criteria'].str.extract(r'\((\d+)%\)')
-        df['Max Score'] = criteria_meta[0].astype(float) / 100
-        df['Weighting'] = criteria_meta[0].astype(float)
-        df['Criteria'] = df['Criteria'].str.replace(r'\s*\(\d+%\)', '', regex=True)
-        
-        # Dynamically handle columns
+        # Rename columns dynamically
         expected_columns = [
             'Criteria', '80-100%', '70-79%', '60-69%', '50-59%',
             '40-49%', '0-39%', 'Score', 'Comment', 'Weighting', 'Max Score'
         ]
         
-        # Align columns with expected structure
+        # Keep only relevant columns and rename
         df = df.iloc[:, :len(expected_columns)]
         df.columns = expected_columns[:len(df.columns)]
         
-        # Validate critical columns
-        required_columns = ['Criteria', '80-100%', 'Weighting', 'Max Score']
-        if not all(col in df.columns for col in required_columns):
-            missing = [col for col in required_columns if col not in df.columns]
+        # Ensure required columns exist
+        required_columns = ['Criteria', 'Weighting', 'Max Score']
+        missing = [col for col in required_columns if col not in df.columns]
+        if missing:
             raise ValueError(f"Missing columns: {', '.join(missing)}")
             
         return df
         
     except Exception as e:
-        st.error(f"Rubric processing error: {str(e)}")
+        st.error(f"Rubric Error: {str(e)}")
         st.markdown("""
-        **Required CSV format:**
-        - Column 1: Criteria (e.g., "Theory Application (15%)")
-        - Columns 2-7: Percentage bands (80-100%, 70-79%, etc.)
+        **Required CSV Format:**
+        - First column: Criteria (must contain weighting in parentheses, e.g. "Theory Application (15%)")
+        - Next 6 columns: Percentage bands (80-100%, 70-79%, etc.)
         - Subsequent columns: Score, Comment
-        - Weighting automatically extracted from criteria names
+        - Final columns: Weighting (auto-generated), Max Score (auto-generated)
         """)
+        st.stop()
         raise
 
 def call_deepseek_api(prompt: str, system_prompt: str) -> str:
@@ -142,7 +146,7 @@ def generate_feedback_document(rubric_df: pd.DataFrame, overall_comments: str, f
         table = doc.add_table(rows=1, cols=len(cols))
         table.style = 'Table Grid'
         
-        # Header row
+        # Header row formatting
         for i, col in enumerate(cols):
             cell = table.cell(0, i)
             cell.text = col
@@ -157,7 +161,7 @@ def generate_feedback_document(rubric_df: pd.DataFrame, overall_comments: str, f
                 cell = cells[i]
                 cell.text = str(row[col]) if pd.notna(row[col]) else ''
                 
-                # Apply green highlight
+                # Apply green highlight to Score/Comment
                 if col in ['Score', 'Comment']:
                     for paragraph in cell.paragraphs:
                         for run in paragraph.runs:
@@ -246,7 +250,7 @@ def main():
                         
                         user_prompt = f"""
                         Submission Content:
-                        {content[:10000]}... [truncated]
+                        {content[:10000]}... [truncated if long]
                         
                         Analysis Guidelines:
                         1. Match exact rubric descriptors
