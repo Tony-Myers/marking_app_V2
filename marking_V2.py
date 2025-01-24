@@ -4,8 +4,8 @@ import requests
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt, Inches
-from docx.oxml.xmlchemy import OxmlElement  # Corrected import
-from docx.oxml.ns import nsdecls  # Correct namespace import
+from docx.oxml import OxmlElement  # Correct import for python-docx 0.8.11
+from docx.oxml.ns import nsdecls
 from io import BytesIO
 from PyPDF2 import PdfReader
 from pptx import Presentation
@@ -133,7 +133,7 @@ def calculate_overall_score(rubric_df):
 def add_shading(cell):
     """Add light green shading to a table cell"""
     shading = OxmlElement('w:shd')
-    shading.set(nsdecls('w'), 'fill', '90EE90')  # Using corrected nsdecls
+    shading.set(nsdecls('w'), 'fill', '90EE90')
     cell._tc.get_or_add_tcPr().append(shading)
 
 def generate_feedback_document(rubric_df: pd.DataFrame, overall_comments: str, feedforward: str, overall_score: float) -> bytes:
@@ -336,3 +336,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
