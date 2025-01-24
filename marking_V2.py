@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import requests
@@ -7,19 +6,15 @@ from docx.enum.text import WD_COLOR_INDEX
 from io import BytesIO
 from PyPDF2 import PdfReader
 from pptx import Presentation
+import re
 
 # Configuration
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 ALLOWED_EXTENSIONS = ["docx", "pdf", "pptx"]
-MODEL_CONFIG = {
-    "default": "deepseek-reasoner",
-    "available_models": ["deepseek-reasoner"]  # Add other models if available
-}
 
 def read_file_content(uploaded_file) -> str:
     """Read content from different file formats"""
     content = ""
-    
     try:
         if uploaded_file.name.endswith('.docx'):
             doc = Document(BytesIO(uploaded_file.getvalue()))
@@ -38,25 +33,42 @@ def read_file_content(uploaded_file) -> str:
         st.error(f"Error reading {uploaded_file.name}: {str(e)}")
         raise
 
+def process_rubric(uploaded_file):
+    """Process percentage-based rubric format"""
+    try:
+        df = pd.read_csv(uploaded_file, skip_blank_lines=True).dropna(how='all')
+        df = df[df['Criteria'].notna()].reset_index(drop=True)
+        df = df.iloc[:, :9]  # Keep relevant columns
+        
+        # Extract max score from criteria name
+        df['Max Score'] = df['Criteria'].str.extract(r'\((\d+)%\)').astype(float) / 100
+        df['Criteria'] = df['Criteria'].str.replace(r'\s*\(\d+%\)', '', regex=True)
+        
+        # Rename columns
+        df.columns = [
+            'Criteria', '80-100%', '70-79%', '60-69%', 
+            '50-59%', '40-49%', '0-39%', 'Score', 'Comment', 'Max Score'
+        ]
+        return df
+    except Exception as e:
+        st.error(f"Error processing rubric: {str(e)}")
+        raise
+
 def call_deepseek_api(prompt: str, system_prompt: str) -> str:
-    """Call DeepSeek API with reasoning-optimized parameters"""
+    """Call DeepSeek API"""
     headers = {
         "Authorization": f"Bearer {st.secrets['DEEPSEEK_API_KEY']}",
-        "Content-Type": "application/json",
-        "Accept": "application/json"
+        "Content-Type": "application/json"
     }
     
     data = {
-        "model": MODEL_CONFIG["default"],
+        "model": "deepseek-reasoner",
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
         ],
-        "temperature": 0.2,  # Lower temperature for more focused responses
-        "top_p": 0.85,
-        "max_tokens": 3000,  # Increased for detailed feedback
-        "frequency_penalty": 0.2,
-        "presence_penalty": 0.1
+        "temperature": 0.2,
+        "max_tokens": 3000
     }
     
     try:
@@ -64,37 +76,32 @@ def call_deepseek_api(prompt: str, system_prompt: str) -> str:
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
     except requests.exceptions.HTTPError as err:
-        error_data = response.json().get("error", {})
-        error_msg = (f"API Error ({response.status_code}): "
-                    f"{error_data.get('message', 'Unknown error')}")
-        st.error(error_msg)
-        st.json(error_data)  # Display full error details
-        raise
-    except Exception as e:
-        st.error(f"API Call Failed: {str(e)}")
+        st.error(f"API Error: {err}\nResponse: {response.text}")
         raise
 
 def generate_feedback_document(rubric_df: pd.DataFrame, overall_comments: str, feedforward: str) -> bytes:
-    """Generate Word document with feedback"""
+    """Generate feedback document with banded rubric"""
     try:
         doc = Document()
-        
-        # Add rubric table
         doc.add_heading('Assessment Rubric', 1)
-        table = doc.add_table(rows=1, cols=len(rubric_df.columns))
+        
+        # Create table with original rubric structure
+        cols = ['Criteria', '80-100%', '70-79%', '60-69%', 
+               '50-59%', '40-49%', '0-39%', 'Score', 'Comment']
+        table = doc.add_table(rows=1, cols=len(cols))
         table.style = 'Table Grid'
         
         # Header row
-        header_cells = table.rows[0].cells
-        for i, col in enumerate(rubric_df.columns):
-            header_cells[i].text = str(col)
+        for i, col in enumerate(cols):
+            table.cell(0, i).text = col
         
         # Data rows
         for _, row in rubric_df.iterrows():
             cells = table.add_row().cells
-            for i, value in enumerate(row):
-                cells[i].text = str(value)
-                if rubric_df.columns[i] in ['Score', 'Comment']:
+            for i, col in enumerate(cols):
+                cells[i].text = str(row[col]) if pd.notna(row[col]) else ''
+                # Highlight score and comment cells
+                if col in ['Score', 'Comment']:
                     for paragraph in cells[i].paragraphs:
                         paragraph.runs[0].font.highlight_color = WD_COLOR_INDEX.GREEN
         
@@ -107,7 +114,6 @@ def generate_feedback_document(rubric_df: pd.DataFrame, overall_comments: str, f
             if point.strip():
                 doc.add_paragraph(point.strip(), style='ListBullet')
         
-        # Save to bytes buffer
         buffer = BytesIO()
         doc.save(buffer)
         buffer.seek(0)
@@ -120,10 +126,9 @@ def main():
     st.set_page_config(page_title="AutoGrader Pro", layout="wide")
     st.title("📚 Automated Assignment Grading System")
     
-    # Password protection
+    # Authentication
     if 'authenticated' not in st.session_state:
         with st.container():
-            st.markdown("## Secure Login")
             password = st.text_input("Enter application password:", type='password')
             if st.button("Authenticate"):
                 if password == st.secrets["APP_PASSWORD"]:
@@ -133,36 +138,31 @@ def main():
                     st.error("Incorrect password")
         return
     
-    # Main application
+    # Main interface
     with st.sidebar:
         st.header("⚙️ Configuration")
         rubric_file = st.file_uploader("📝 Upload Grading Rubric (CSV)", type=['csv'])
-        assignment_task = st.text_area("📋 Assignment Task Description", height=150,
-                                      help="Clearly describe the assignment requirements")
+        assignment_task = st.text_area("📋 Assignment Task Description", height=150)
         level = st.selectbox("🎓 Academic Level", [
             "Undergraduate Level 4", "Undergraduate Level 5", 
             "Undergraduate Level 6", "Masters Level 7", "PhD Level 8"
         ])
-        assessment_type = st.selectbox("📄 Assessment Type", [
-            "Essay", "Report", "Presentation", "Practical Work"
-        ])
-        additional_instructions = st.text_area("🔧 Additional Instructions", height=100,
-                                              help="Special considerations or marking guidelines")
     
     st.header("📤 Student Submissions")
     student_files = st.file_uploader(
         "Upload Student Assignments",
         type=ALLOWED_EXTENSIONS,
-        accept_multiple_files=True,
-        help="Supported formats: DOCX, PDF, PPTX"
+        accept_multiple_files=True
     )
     
     if st.button("🚀 Run Automated Grading") and rubric_file and student_files:
         try:
-            rubric_df = pd.read_csv(rubric_file)
-            required_columns = ['Criteria', 'Description', 'Max Score']
+            rubric_df = process_rubric(rubric_file)
+            
+            required_columns = ['Criteria', '80-100%', '70-79%', '60-69%',
+                               '50-59%', '40-49%', '0-39%', 'Max Score']
             if not all(col in rubric_df.columns for col in required_columns):
-                st.error(f"Rubric CSV must contain: {', '.join(required_columns)}")
+                st.error("Invalid rubric format. Please use the template CSV.")
                 return
             
             for uploaded_file in student_files:
@@ -170,55 +170,45 @@ def main():
                     try:
                         content = read_file_content(uploaded_file)
                         
-                        # System prompt optimized for deepseek-reasoner
                         system_prompt = f"""
-                        You are an expert academic assessor specializing in {assessment_type} evaluations. 
-                        Conduct a comprehensive analysis of the student submission considering:
-
+                        As an academic expert, evaluate submissions using this rubric:
+                        
                         Academic Level: {level}
-                        Assessment Type: {assessment_type}
                         Assignment Task: {assignment_task}
-                        Additional Instructions: {additional_instructions}
-
+                        
                         Rubric Structure:
                         {rubric_df.to_csv(index=False)}
-
-                        Required Output Format:
+                        
+                        Provide response in EXACT format:
                         SCORES:
-                        - [Criterion Name]: [Awarded Score]/[Max Score], [Concise Justification]
-                        ...
+                        - [Criteria Name]: [Selected Band], [Score]/[Max Score], [Comment]
                         OVERALL_COMMENTS:
-                        [Structured evaluation covering strengths/weaknesses]
+                        [Concise evaluation]
                         FEEDFORWARD:
-                        - [Actionable Improvement Suggestion 1]
-                        - [Actionable Improvement Suggestion 2]
-                        ...
+                        - [Suggestion 1]
+                        - [Suggestion 2]
                         """
                         
                         user_prompt = f"""
                         STUDENT SUBMISSION CONTENT:
-                        {content[:10000]}... [truncated if exceeding length]
-
+                        {content[:10000]}... [truncated if long]
+                        
                         ANALYSIS INSTRUCTIONS:
-                        1. Perform criterion-by-criterion evaluation
-                        2. Maintain strict alignment with rubric metrics
-                        3. Provide specific examples from the text
-                        4. Balance conciseness with depth
-                        5. Prioritize objective, measurable feedback
+                        1. Match work to appropriate percentage band
+                        2. Reference specific rubric descriptors
+                        3. Maintain academic rigor
+                        4. Provide detailed justification
                         """
                         
-                        with st.spinner("🔍 Conducting in-depth analysis..."):
-                            response = call_deepseek_api(
-                                prompt=user_prompt,
-                                system_prompt=system_prompt
-                            )
+                        with st.spinner("🔍 Analyzing submission..."):
+                            response = call_deepseek_api(user_prompt, system_prompt)
                         
                         # Parse response
                         scores = {}
                         overall_comments = []
                         feedforward = []
                         current_section = None
-
+                        
                         for line in response.split('\n'):
                             line = line.strip()
                             if line.startswith("SCORES:"):
@@ -229,36 +219,35 @@ def main():
                                 current_section = 'feedforward'
                             else:
                                 if current_section == 'scores' and line.startswith('-'):
-                                    parts = line[2:].split(':', 1)
+                                    parts = re.split(r':\s*', line[2:], 1)
                                     if len(parts) == 2:
-                                        criterion, evaluation = parts
-                                        score_part, comment = evaluation.split(',', 1)
+                                        criterion, rest = parts
+                                        band, score_comment = rest.split(',', 1)
+                                        score, comment = score_comment.split('/', 1)
                                         scores[criterion.strip()] = {
-                                            'Score': score_part.strip(),
+                                            'Selected Band': band.strip(),
+                                            'Score': score.strip(),
                                             'Comment': comment.strip()
                                         }
                                 elif current_section == 'overall':
                                     overall_comments.append(line)
                                 elif current_section == 'feedforward' and line.startswith('-'):
                                     feedforward.append(line[2:].strip())
-
+                        
                         # Update rubric dataframe
                         for criterion, data in scores.items():
                             mask = rubric_df['Criteria'] == criterion
-                            if not mask.any():
-                                st.warning(f"Criterion '{criterion}' not found in rubric")
-                                continue
-                            rubric_df.loc[mask, 'Score'] = data['Score']
-                            rubric_df.loc[mask, 'Comment'] = data['Comment']
+                            if mask.any():
+                                rubric_df.loc[mask, 'Score'] = data['Score']
+                                rubric_df.loc[mask, 'Comment'] = data['Comment']
                         
-                        # Generate feedback document
+                        # Generate feedback
                         feedback_doc = generate_feedback_document(
-                            rubric_df,
+                            rubric_df.fillna(''),
                             "\n".join(overall_comments).strip(),
                             "\n".join(feedforward)
                         )
                         
-                        # Download button
                         st.download_button(
                             label=f"📥 Download Feedback for {uploaded_file.name}",
                             data=feedback_doc,
