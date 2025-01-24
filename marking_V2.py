@@ -1,20 +1,19 @@
+# app.py
 import streamlit as st
 import pandas as pd
 import requests
 from docx import Document
 from docx.enum.text import WD_COLOR_INDEX
 from io import BytesIO
-import base64
 from PyPDF2 import PdfReader
 from pptx import Presentation
 
 # Configuration
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 ALLOWED_EXTENSIONS = ["docx", "pdf", "pptx"]
-MODEL_MAP = {
-    "v3": "deepseek-v3",
-    "r1": "deepseek-r1",
-    "default": "deepseek-r1"
+MODEL_CONFIG = {
+    "default": "deepseek-reasoner",
+    "available_models": ["deepseek-reasoner"]  # Add other models if available
 }
 
 def read_file_content(uploaded_file) -> str:
@@ -39,8 +38,8 @@ def read_file_content(uploaded_file) -> str:
         st.error(f"Error reading {uploaded_file.name}: {str(e)}")
         raise
 
-def call_deepseek_api(prompt: str, system_prompt: str, model: str = MODEL_MAP['default']) -> str:
-    """Call DeepSeek API with given prompts"""
+def call_deepseek_api(prompt: str, system_prompt: str) -> str:
+    """Call DeepSeek API with reasoning-optimized parameters"""
     headers = {
         "Authorization": f"Bearer {st.secrets['DEEPSEEK_API_KEY']}",
         "Content-Type": "application/json",
@@ -48,15 +47,16 @@ def call_deepseek_api(prompt: str, system_prompt: str, model: str = MODEL_MAP['d
     }
     
     data = {
-        "model": model,
+        "model": MODEL_CONFIG["default"],
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
         ],
-        "temperature": 0.3,
-        "top_p": 0.9,
-        "max_tokens": 2000,
-        "stream": False
+        "temperature": 0.2,  # Lower temperature for more focused responses
+        "top_p": 0.85,
+        "max_tokens": 3000,  # Increased for detailed feedback
+        "frequency_penalty": 0.2,
+        "presence_penalty": 0.1
     }
     
     try:
@@ -64,7 +64,11 @@ def call_deepseek_api(prompt: str, system_prompt: str, model: str = MODEL_MAP['d
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
     except requests.exceptions.HTTPError as err:
-        st.error(f"API Error: {err}\nResponse: {response.text}")
+        error_data = response.json().get("error", {})
+        error_msg = (f"API Error ({response.status_code}): "
+                    f"{error_data.get('message', 'Unknown error')}")
+        st.error(error_msg)
+        st.json(error_data)  # Display full error details
         raise
     except Exception as e:
         st.error(f"API Call Failed: {str(e)}")
@@ -113,12 +117,13 @@ def generate_feedback_document(rubric_df: pd.DataFrame, overall_comments: str, f
         raise
 
 def main():
-    st.set_page_config(page_title="AutoGrader", layout="wide")
-    st.title("Automated Assignment Grading System")
+    st.set_page_config(page_title="AutoGrader Pro", layout="wide")
+    st.title("📚 Automated Assignment Grading System")
     
     # Password protection
     if 'authenticated' not in st.session_state:
         with st.container():
+            st.markdown("## Secure Login")
             password = st.text_input("Enter application password:", type='password')
             if st.button("Authenticate"):
                 if password == st.secrets["APP_PASSWORD"]:
@@ -130,9 +135,10 @@ def main():
     
     # Main application
     with st.sidebar:
-        st.header("Configuration")
+        st.header("⚙️ Configuration")
         rubric_file = st.file_uploader("📝 Upload Grading Rubric (CSV)", type=['csv'])
-        assignment_task = st.text_area("📋 Assignment Task Description", height=150)
+        assignment_task = st.text_area("📋 Assignment Task Description", height=150,
+                                      help="Clearly describe the assignment requirements")
         level = st.selectbox("🎓 Academic Level", [
             "Undergraduate Level 4", "Undergraduate Level 5", 
             "Undergraduate Level 6", "Masters Level 7", "PhD Level 8"
@@ -140,7 +146,8 @@ def main():
         assessment_type = st.selectbox("📄 Assessment Type", [
             "Essay", "Report", "Presentation", "Practical Work"
         ])
-        additional_instructions = st.text_area("🔧 Additional Instructions", height=100)
+        additional_instructions = st.text_area("🔧 Additional Instructions", height=100,
+                                              help="Special considerations or marking guidelines")
     
     st.header("📤 Student Submissions")
     student_files = st.file_uploader(
@@ -150,59 +157,68 @@ def main():
         help="Supported formats: DOCX, PDF, PPTX"
     )
     
-    if st.button("🚀 Run Marking") and rubric_file and student_files:
+    if st.button("🚀 Run Automated Grading") and rubric_file and student_files:
         try:
             rubric_df = pd.read_csv(rubric_file)
-            if 'Criteria' not in rubric_df.columns:
-                st.error("Rubric CSV must contain 'Criteria' column")
+            required_columns = ['Criteria', 'Description', 'Max Score']
+            if not all(col in rubric_df.columns for col in required_columns):
+                st.error(f"Rubric CSV must contain: {', '.join(required_columns)}")
                 return
             
             for uploaded_file in student_files:
-                with st.expander(f"Processing {uploaded_file.name}"):
+                with st.expander(f"Processing {uploaded_file.name}", expanded=True):
                     try:
                         content = read_file_content(uploaded_file)
                         
+                        # System prompt optimized for deepseek-reasoner
                         system_prompt = f"""
-                        You are an academic assessment expert. Evaluate the student's work based on:
-                        - Academic level: {level}
-                        - Assessment type: {assessment_type}
-                        - Assignment task: {assignment_task}
-                        - Additional instructions: {additional_instructions}
-                        
-                        Use this rubric structure:
+                        You are an expert academic assessor specializing in {assessment_type} evaluations. 
+                        Conduct a comprehensive analysis of the student submission considering:
+
+                        Academic Level: {level}
+                        Assessment Type: {assessment_type}
+                        Assignment Task: {assignment_task}
+                        Additional Instructions: {additional_instructions}
+
+                        Rubric Structure:
                         {rubric_df.to_csv(index=False)}
-                        
-                        Provide response in this EXACT format:
+
+                        Required Output Format:
                         SCORES:
-                        - Criteria 1 Name: [score]/[max_score], [comment]
-                        - Criteria 2 Name: [score]/[max_score], [comment]
+                        - [Criterion Name]: [Awarded Score]/[Max Score], [Concise Justification]
                         ...
                         OVERALL_COMMENTS:
-                        [Concise overall assessment]
+                        [Structured evaluation covering strengths/weaknesses]
                         FEEDFORWARD:
-                        - [Suggestion 1]
-                        - [Suggestion 2]
+                        - [Actionable Improvement Suggestion 1]
+                        - [Actionable Improvement Suggestion 2]
                         ...
                         """
                         
                         user_prompt = f"""
                         STUDENT SUBMISSION CONTENT:
-                        {content[:5000]}... [truncated if too long]
+                        {content[:10000]}... [truncated if exceeding length]
+
+                        ANALYSIS INSTRUCTIONS:
+                        1. Perform criterion-by-criterion evaluation
+                        2. Maintain strict alignment with rubric metrics
+                        3. Provide specific examples from the text
+                        4. Balance conciseness with depth
+                        5. Prioritize objective, measurable feedback
                         """
                         
-                        with st.spinner("Analyzing submission..."):
+                        with st.spinner("🔍 Conducting in-depth analysis..."):
                             response = call_deepseek_api(
                                 prompt=user_prompt,
-                                system_prompt=system_prompt,
-                                model=MODEL_MAP['r1']
+                                system_prompt=system_prompt
                             )
                         
-                        # Process API response
+                        # Parse response
                         scores = {}
-                        overall_comments = ""
+                        overall_comments = []
                         feedforward = []
-                        
                         current_section = None
+
                         for line in response.split('\n'):
                             line = line.strip()
                             if line.startswith("SCORES:"):
@@ -213,29 +229,32 @@ def main():
                                 current_section = 'feedforward'
                             else:
                                 if current_section == 'scores' and line.startswith('-'):
-                                    parts = line[2:].split(':')
+                                    parts = line[2:].split(':', 1)
                                     if len(parts) == 2:
-                                        criterion, rest = parts
-                                        score_part, comment = rest.split(',', 1)
+                                        criterion, evaluation = parts
+                                        score_part, comment = evaluation.split(',', 1)
                                         scores[criterion.strip()] = {
                                             'Score': score_part.strip(),
                                             'Comment': comment.strip()
                                         }
                                 elif current_section == 'overall':
-                                    overall_comments += line + " "
+                                    overall_comments.append(line)
                                 elif current_section == 'feedforward' and line.startswith('-'):
                                     feedforward.append(line[2:].strip())
-                        
+
                         # Update rubric dataframe
                         for criterion, data in scores.items():
                             mask = rubric_df['Criteria'] == criterion
+                            if not mask.any():
+                                st.warning(f"Criterion '{criterion}' not found in rubric")
+                                continue
                             rubric_df.loc[mask, 'Score'] = data['Score']
                             rubric_df.loc[mask, 'Comment'] = data['Comment']
                         
                         # Generate feedback document
                         feedback_doc = generate_feedback_document(
                             rubric_df,
-                            overall_comments.strip(),
+                            "\n".join(overall_comments).strip(),
                             "\n".join(feedforward)
                         )
                         
