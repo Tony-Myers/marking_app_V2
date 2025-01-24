@@ -2,8 +2,9 @@ import streamlit as st
 import pandas as pd
 import requests
 from docx import Document
-from docx.enum.text import WD_COLOR_INDEX, WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt, Inches
+from docx.oxml.shared import OxmlElement, nsdecls
 from io import BytesIO
 from PyPDF2 import PdfReader
 from pptx import Presentation
@@ -14,14 +15,19 @@ DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 ALLOWED_EXTENSIONS = ["docx", "pdf", "pptx"]
 
 def set_document_format(doc):
-    """Configure document layout and formatting"""
+    """Configure document layout with correct 2cm margins"""
     section = doc.sections[0]
     section.orientation = 1  # Landscape
     section.page_width = Inches(11.69)
     section.page_height = Inches(8.27)
-    section.top_margin = Inches(0.39)
-    section.bottom_margin = Inches(0.39)
     
+    # Set all margins to 2cm (≈0.79 inches)
+    section.top_margin = Inches(0.79)
+    section.bottom_margin = Inches(0.79)
+    section.left_margin = Inches(0.79)
+    section.right_margin = Inches(0.79)
+    
+    # Set default font
     style = doc.styles['Normal']
     font = style.font
     font.name = 'Calibri'
@@ -49,49 +55,43 @@ def read_file_content(uploaded_file) -> str:
         raise
 
 def process_rubric(uploaded_file):
-    """Process rubric with empty Criteria Score and Brief Comment columns"""
+    """Process rubric while preserving original column names"""
     try:
-        # Read CSV while preserving empty columns and rows
+        # Read and clean CSV
         df = pd.read_csv(uploaded_file, skip_blank_lines=False)
-        
-        # Clean column names and validate structure
+        df = df.dropna(how='all', axis=0)
         df.columns = [col.strip() for col in df.columns]
+
+        # Validate required columns
         required_columns = [
             'Criteria', 'Criteria weighting', '80-100%', '70-79%',
             '60-69%', '50-59%', '40-49%', '0-39%',
             'Criteria Score', 'Brief Comment'
         ]
-        
-        # Check for required columns
         missing = [col for col in required_columns if col not in df.columns]
         if missing:
             raise ValueError(f"Missing columns: {', '.join(missing)}")
-        
-        # Clean data without removing empty columns
-        df = df[df['Criteria'].notna()].reset_index(drop=True)
-        df = df[required_columns]  # Maintain original column order
-        
+
         # Process weighting column
         if df['Criteria weighting'].dtype == object:
             df['Weighting'] = df['Criteria weighting'].str.replace('%', '').astype(float) / 100
         else:
             df['Weighting'] = df['Criteria weighting'].astype(float)
-        
+
         # Validate weighting sum
         total_weight = round(df['Weighting'].sum(), 2)
         if total_weight != 1.0:
             raise ValueError(f"Total weighting must be 100% (current: {total_weight*100}%)")
-        
-        return df
+
+        return df.fillna('')
 
     except Exception as e:
         st.error(f"Rubric Error: {str(e)}")
         st.markdown("""
         **Required CSV Format:**
         - Must maintain all columns even if empty
-        - Preserve exact column names and order:
-          Criteria, Criteria weighting, 80-100%, 70-79%, 60-69%, 
-          50-59%, 40-49%, 0-39%, Criteria Score, Brief Comment
+        - Preserve exact column names and order
+        - Keep Criteria Score and Brief Comment columns present
         """)
         st.stop()
         raise
@@ -131,57 +131,73 @@ def calculate_overall_score(rubric_df):
         st.error(f"Score calculation error: {str(e)}")
         return 0.0
 
-def generate_feedback_document(rubric_df: pd.DataFrame, overall_comments: str, feedforward: str) -> bytes:
-    """Generate formatted feedback document"""
+def add_shading(cell):
+    """Add light green shading to a table cell"""
+    shading = OxmlElement('w:shd')
+    shading.set(nsdecls('w'), 'fill', '90EE90')
+    cell._tc.get_or_add_tcPr().append(shading)
+
+def generate_feedback_document(rubric_df: pd.DataFrame, overall_comments: str, feedforward: str, overall_score: float) -> bytes:
+    """Generate formatted feedback document with all elements"""
     try:
         doc = Document()
         set_document_format(doc)
         
-        # Rubric table with original column names
+        # Student information header
+        doc.add_heading('Student Feedback', 0)
+        para = doc.add_paragraph()
+        para.add_run("Name: ").bold = True
+        para.add_run("[Student Name]")
+        
+        # Rubric table
+        doc.add_heading('Assessment Rubric', 1)
         cols = [
             'Criteria', 'Criteria weighting', '80-100%', '70-79%',
             '60-69%', '50-59%', '40-49%', '0-39%', 
             'Criteria Score', 'Brief Comment'
         ]
+        
         table = doc.add_table(rows=1, cols=len(cols))
         table.style = 'Table Grid'
         
-        # Header row formatting
+        # Set column widths
+        col_widths = [Inches(1.5), Inches(0.7)] + [Inches(1.2)]*6 + [Inches(0.7), Inches(1.5)]
+        for i, width in enumerate(col_widths):
+            table.columns[i].width = width
+
+        # Header row
         for i, col in enumerate(cols):
             cell = table.cell(0, i)
             cell.text = col
-            for paragraph in cell.paragraphs:
-                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                paragraph.runs[0].font.bold = True
-        
-        # Data rows with highlighting
+            cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            cell.paragraphs[0].runs[0].font.bold = True
+
+        # Data rows
         for _, row in rubric_df.iterrows():
-            cells = table.add_row().cells
+            row_cells = table.add_row().cells
             for i, col in enumerate(cols):
-                cell = cells[i]
-                cell.text = str(row[col]) if pd.notna(row[col]) else ''
+                cell = row_cells[i]
+                cell.text = str(row[col])
                 
-                # Apply green highlight to Score/Comment columns
-                if col in ['Criteria Score', 'Brief Comment']:
-                    for paragraph in cell.paragraphs:
-                        for run in paragraph.runs:
-                            run.font.highlight_color = WD_COLOR_INDEX.GREEN
-        
-        # Overall score
-        overall_score = calculate_overall_score(rubric_df)
-        p = doc.add_paragraph()
-        p.add_run(f"Overall Score: {overall_score}%").bold = True
-        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-        
+                # Add shading to score and comment cells
+                if col in ['Criteria Score', 'Brief Comment'] and str(row[col]).strip():
+                    add_shading(cell)
+
+        # Overall score section
+        doc.add_heading('Overall Mark', 1)
+        para = doc.add_paragraph()
+        para.add_run(f"Final Grade: {overall_score}%").bold = True
+        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
         # Feedback sections
-        doc.add_heading('Overall Comments', 2)
+        doc.add_heading('Overall Comments', 1)
         doc.add_paragraph(overall_comments)
-        
-        doc.add_heading('Feedforward Suggestions', 2)
+
+        doc.add_heading('Feedforward Suggestions', 1)
         for point in feedforward.split('\n'):
             if point.strip():
                 doc.add_paragraph(point.strip(), style='ListBullet')
-        
+
         buffer = BytesIO()
         doc.save(buffer)
         buffer.seek(0)
@@ -241,11 +257,12 @@ def main():
                         
                         Required Format:
                         SCORES:
-                        - [Criterion]: [Band], [Score%], [Comment]
+                        - [Criterion]: [Selected Band], [Score%], [Comment]
                         OVERALL_COMMENTS:
-                        [Evaluation]
+                        [Comprehensive evaluation]
                         FEEDFORWARD:
-                        - [Suggestion]
+                        - [Actionable suggestion 1]
+                        - [Actionable suggestion 2]
                         """
                         
                         user_prompt = f"""
@@ -255,8 +272,9 @@ def main():
                         Analysis Guidelines:
                         1. Match exact percentage band descriptors
                         2. Provide percentage scores in 'Criteria Score' column
-                        3. Add brief comments in 'Brief Comment' column
-                        4. Reference specific examples from the text
+                        3. Add specific comments in 'Brief Comment' column
+                        4. Reference concrete examples from the text
+                        5. Maintain academic rigor in feedback
                         """
                         
                         with st.spinner("Analyzing..."):
@@ -297,11 +315,15 @@ def main():
                                 rubric_df.loc[mask, 'Criteria Score'] = data['Criteria Score']
                                 rubric_df.loc[mask, 'Brief Comment'] = data['Brief Comment']
                         
+                        # Calculate overall score
+                        overall_score = calculate_overall_score(rubric_df)
+                        
                         # Generate document
                         feedback_doc = generate_feedback_document(
-                            rubric_df.fillna(''),
+                            rubric_df,
                             "\n".join(overall_comments).strip(),
-                            "\n".join(feedforward)
+                            "\n".join(feedforward),
+                            overall_score
                         )
                         
                         st.download_button(
@@ -319,4 +341,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
     
