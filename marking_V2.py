@@ -6,12 +6,11 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt, Inches
 from docx.oxml import OxmlElement
 from docx.oxml.ns import nsdecls
-from io import BytesIO, StringIO  # Added StringIO import
+from io import BytesIO, StringIO
 from PyPDF2 import PdfReader
 import re
 import tiktoken
 import os
-import csv
 
 # Configuration
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
@@ -73,8 +72,21 @@ def extract_text_from_pdf(file):
         return None
 
 def parse_csv_section(csv_text):
+    """Enhanced CSV parsing with column validation"""
     try:
-        return pd.read_csv(StringIO(csv_text), quotechar='"', skipinitialspace=True)
+        df = pd.read_csv(StringIO(csv_text), quotechar='"', skipinitialspace=True)
+        
+        # Normalize column names
+        df.columns = df.columns.str.strip().str.lower()
+        
+        # Validate required columns
+        required_columns = {'criterion', 'score', 'comment'}
+        missing = required_columns - set(df.columns)
+        if missing:
+            st.error(f"CSV missing columns: {', '.join(missing)}")
+            return None
+            
+        return df
     except Exception as e:
         st.error(f"CSV Parse Error: {str(e)}")
         return None
@@ -114,7 +126,7 @@ def generate_feedback_doc(student_name, rubric_df, overall_comments, feedforward
         for i, value in enumerate(row):
             cell = row_cells[i]
             cell.text = str(value)
-            if 'Score' in rubric_df.columns[i]:
+            if 'score' in str(rubric_df.columns[i]).lower():
                 try:
                     score = float(value)
                     for range_col in [col for col in rubric_df.columns if '-' in col and '%' in col]:
@@ -165,12 +177,15 @@ def main():
         try:
             # Read and process rubric
             rubric_df = pd.read_csv(rubric_file)
-            rubric_df['Criterion'] = rubric_df['Criterion'].astype(str)
-            rubric_df['Weight'] = rubric_df['Criterion'].apply(extract_weight)
-            rubric_df['Criterion'] = rubric_df['Criterion'].apply(lambda x: re.sub(r'\s*\(\d+%\)', '', x))
+            
+            # Clean and normalize columns
+            rubric_df.columns = rubric_df.columns.str.strip().str.lower()
+            rubric_df['criterion'] = rubric_df['criterion'].astype(str)
+            rubric_df['weight'] = rubric_df['criterion'].apply(extract_weight)
+            rubric_df['criterion'] = rubric_df['criterion'].apply(lambda x: re.sub(r'\s*\(\d+%\)', '', x).strip())
             
             percentage_columns = [col for col in rubric_df.columns if '%' in col]
-            criteria_string = '\n'.join(rubric_df['Criterion'].tolist())
+            criteria_string = '\n'.join(rubric_df['criterion'].tolist())
             
             for submission in submissions:
                 student_name = os.path.splitext(submission.name)[0]
@@ -190,41 +205,29 @@ def main():
                     text = truncate_text(text, int(MAX_TOKENS * 0.6))
                 
                 # Prepare prompts
-                system_prompt = f"""
-You are an experienced UK academic. Provide strict, rigorous feedback using:
+                system_prompt = f"""You are an experienced UK academic. Provide strict feedback using:
 - British English spelling
-- Birmingham Newman University referencing guidelines
-- Second person narrative
-- UK undergraduate standards
-"""
+- Birmingham Newman University guidelines
+- Second person narrative"""
+                
                 user_prompt = f"""
-**Assignment Task:** {assignment_task}
-**Student Submission:** {text}
+**Task:** {assignment_task}
+**Submission:** {text[:10000]}
 **Rubric Criteria:** {criteria_string}
 
 Generate feedback with:
-1. CSV section starting with 'Criterion,Score,Comment'
-2. Overall Comments (150 words max)
-3. Feedforward (bullet points, 150 words max)
-4. Strict adherence to rubric percentages
+1. CSV starting with 'Criterion,Score,Comment'
+2. Overall Comments (150 words)
+3. Feedforward (bullet points)
 
-**Example Format:**
+**Example:**
 Criterion,Score,Comment
-"Linking Theory",75,"Good but needs more critical analysis"
-...
-
-Overall Comments:
-Your essay demonstrates... 
-
-Feedforward:
-- Improve critical analysis
-- Strengthen theoretical links
+"Linking Theory",75,"Good analysis but needs more depth"
 ...
 """
                 # API Call
                 response = call_deepseek_api(user_prompt, system_prompt)
                 if not response:
-                    st.error(f"Failed to get response for {student_name}")
                     continue
                 
                 # Parse response
@@ -234,28 +237,32 @@ Feedforward:
                     overall_comments = comments_part[0].strip()
                     feedforward = comments_part[1].strip()
                 except IndexError:
-                    st.error("Invalid response format from API")
+                    st.error("Invalid response format")
                     continue
                 
                 # Process scores
                 scores_df = parse_csv_section(csv_part)
-                if scores_df is None:
-                    st.error(f"Failed to parse scores for {student_name}")
+                if scores_df is None or scores_df.empty:
+                    st.error("Invalid scores data")
                     continue
                 
                 # Merge dataframes
                 try:
-                    merged_df = rubric_df.merge(scores_df, on='Criterion', how='left')
-                    merged_df['Weighted'] = merged_df['Weight'] * merged_df['Score'] / 100
-                    total_mark = merged_df['Weighted'].sum()
-                except KeyError:
-                    st.error("Missing columns in merged dataframe")
+                    merged_df = rubric_df.merge(
+                        scores_df[['criterion', 'score', 'comment']],
+                        on='criterion',
+                        how='left'
+                    )
+                    merged_df['weighted'] = merged_df['weight'] * merged_df['score'] / 100
+                    total_mark = merged_df['weighted'].sum()
+                except KeyError as e:
+                    st.error(f"Merge error: {str(e)}")
                     continue
                 
                 # Generate document
                 doc_buffer = generate_feedback_doc(
                     student_name,
-                    merged_df[['Criterion'] + percentage_columns + ['Score', 'Comment']],
+                    merged_df[['criterion'] + percentage_columns + ['score', 'comment']],
                     overall_comments,
                     feedforward,
                     total_mark
@@ -273,4 +280,3 @@ Feedforward:
 
 if __name__ == "__main__":
     main()
-    
