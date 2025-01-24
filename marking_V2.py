@@ -49,7 +49,7 @@ def read_file_content(uploaded_file) -> str:
         raise
 
 def process_rubric(uploaded_file):
-    """Process rubric with separate weighting column"""
+    """Process rubric with Criteria Score and Brief Comment columns"""
     try:
         # Read and clean CSV
         df = pd.read_csv(uploaded_file, skip_blank_lines=True)
@@ -57,7 +57,11 @@ def process_rubric(uploaded_file):
         df.columns = [col.strip() for col in df.columns]
 
         # Validate required columns
-        required_columns = ['Criteria', 'Criteria weighting']
+        required_columns = [
+            'Criteria', 'Criteria weighting', '80-100%', '70-79%',
+            '60-69%', '50-59%', '40-49%', '0-39%',
+            'Criteria Score', 'Brief Comment'
+        ]
         missing = [col for col in required_columns if col not in df.columns]
         if missing:
             raise ValueError(f"Missing columns: {', '.join(missing)}")
@@ -73,8 +77,11 @@ def process_rubric(uploaded_file):
         if total_weight != 1.0:
             raise ValueError(f"Total weighting must be 100% (current: {total_weight*100}%)")
 
-        # Add max score column
-        df['Max Score'] = (df['Weighting'] * 100).astype(int)
+        # Rename columns to match code expectations
+        df = df.rename(columns={
+            'Criteria Score': 'Score',
+            'Brief Comment': 'Comment'
+        })
         
         return df
 
@@ -82,17 +89,22 @@ def process_rubric(uploaded_file):
         st.error(f"Rubric Error: {str(e)}")
         st.markdown("""
         **Required CSV Format:**
-        - Must contain columns: 'Criteria', 'Criteria weighting'
-        - Weighting can be:
-          - Decimals (e.g., 0.15) summing to 1.0
-          - Percentages (e.g., 15%) summing to 100%
+        - Must contain columns: 
+          Criteria, Criteria weighting, 80-100%, 70-79%, 60-69%, 
+          50-59%, 40-49%, 0-39%, Criteria Score, Brief Comment
         - Example structure:
         """)
         st.table(pd.DataFrame({
-            'Criteria': ['Theory Application', 'Research Quality'],
-            'Criteria weighting': ['15%', 0.15],
-            '80-100%': ['Excellent...', 'Outstanding...'],
-            '70-79%': ['Good...', 'Strong...']
+            'Criteria': ['Theory Application'],
+            'Criteria weighting': ['15%'],
+            '80-100%': ['Excellent...'],
+            '70-79%': ['Good...'],
+            '60-69%': ['Average...'],
+            '50-59%': ['Below average...'],
+            '40-49%': ['Poor...'],
+            '0-39%': ['Very poor...'],
+            'Criteria Score': [''],
+            'Brief Comment': ['']
         }))
         st.stop()
         raise
@@ -140,8 +152,10 @@ def generate_feedback_document(rubric_df: pd.DataFrame, overall_comments: str, f
         
         # Rubric table
         doc.add_heading('Assessment Rubric', 1)
-        cols = ['Criteria', 'Weighting', '80-100%', '70-79%', '60-69%', 
-               '50-59%', '40-49%', '0-39%', 'Score', 'Comment']
+        cols = [
+            'Criteria', 'Criteria weighting', '80-100%', '70-79%',
+            '60-69%', '50-59%', '40-49%', '0-39%', 'Score', 'Comment'
+        ]
         table = doc.add_table(rows=1, cols=len(cols))
         table.style = 'Table Grid'
         
@@ -240,7 +254,7 @@ def main():
                         
                         Required Format:
                         SCORES:
-                        - [Criterion]: [Band], [Score%]/[Max%], [Comment]
+                        - [Criterion]: [Band], [Score%], [Comment]
                         OVERALL_COMMENTS:
                         [Evaluation]
                         FEEDFORWARD:
@@ -252,10 +266,10 @@ def main():
                         {content[:10000]}... [truncated if long]
                         
                         Analysis Guidelines:
-                        1. Match exact rubric descriptors
-                        2. Provide percentage scores
-                        3. Reference specific examples
-                        4. Maintain academic standards
+                        1. Match exact percentage band descriptors
+                        2. Provide percentage scores in 'Score' column
+                        3. Reference specific examples from the text
+                        4. Maintain academic standards in comments
                         """
                         
                         with st.spinner("Analyzing..."):
@@ -277,9 +291,9 @@ def main():
                                 current_section = 'feedforward'
                             else:
                                 if current_section == 'scores' and line.startswith('-'):
-                                    match = re.match(r"- (.+?): (.+?), (\d+)%/(\d+)%, (.+)", line)
+                                    match = re.match(r"- (.+?): (.+?), (\d+)%, (.+)", line)
                                     if match:
-                                        criterion, band, score, max_score, comment = match.groups()
+                                        criterion, band, score, comment = match.groups()
                                         scores[criterion.strip()] = {
                                             'Score': f"{score}%",
                                             'Comment': comment.strip()
@@ -318,3 +332,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
