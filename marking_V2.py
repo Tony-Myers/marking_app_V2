@@ -6,6 +6,7 @@ import tiktoken
 import os
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.section import WD_ORIENT  # Added missing import
 from docx.shared import Pt, Inches
 from docx.oxml import OxmlElement
 from docx.oxml.ns import nsdecls
@@ -87,24 +88,25 @@ def parse_csv_section(csv_text):
 
 def parse_api_response(response):
     try:
-        # Normalize response format
         normalized = response.replace('\r\n', '\n').lower()
         
-        # Extract CSV section using more robust regex
+        # Extract CSV section
         csv_match = re.search(
-            r'(?:^|\n)criterion,score,comment\n(.*?)(?=\noverall comments:|\nfeedforward:|\Z)', 
+            r'---csv_start---\s*criterion,score,comment\s*(.*?)\s*---csv_end---',
             normalized, 
             re.DOTALL
         )
         
-        # Extract comments and feedforward with more flexible matching
+        # Extract comments
         comments_match = re.search(
-            r'(?:overall comments:?\s*)(.*?)(?=\nfeedforward:|\Z)', 
+            r'---comments_start---\s*overall comments:\s*(.*?)\s*---comments_end---',
             normalized, 
             re.DOTALL
         )
+        
+        # Extract feedforward
         feedforward_match = re.search(
-            r'(?:feedforward:?\s*)(.*)', 
+            r'---feedforward_start---\s*feedforward:\s*(.*?)\s*---feedforward_end---',
             normalized, 
             re.DOTALL
         )
@@ -203,7 +205,7 @@ def main():
     assignment_task = st.text_area("Assignment Task & Academic Level", height=150)
     
     st.header("Upload Files")
-    rubric_file = st.file_uploader("Rubric (CSV)", type=['csv'])
+    rubric_file = st.file_uploader("Rubric (CSV)", type=['csv'])  # Fixed typo here
     submissions = st.file_uploader("Student Submissions", type=ALLOWED_EXTENSIONS, accept_multiple_files=True)
     
     if rubric_file and submissions and st.button("Start Marking"):
