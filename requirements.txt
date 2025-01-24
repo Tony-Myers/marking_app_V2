@@ -1,8 +1,7 @@
-# requirements.txt
 streamlit==1.41.1
 pandas==2.2.3
 requests==2.32.3
-python-docx==0.8.11  # Must use this specific version
+python-docx==0.8.11
 PyPDF2==3.0.1
-tiktoken==0.6.0  # Added missing dependency
+tiktoken==0.6.0
 lxml==5.3.0
