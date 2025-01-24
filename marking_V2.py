@@ -4,7 +4,7 @@ import requests
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt, Inches
-from docx.oxml import OxmlElement  # Correct import for python-docx 0.8.11
+from docx.oxml import OxmlElement
 from docx.oxml.ns import nsdecls
 from io import BytesIO
 from PyPDF2 import PdfReader
@@ -16,16 +16,17 @@ DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 ALLOWED_EXTENSIONS = ["docx", "pdf", "pptx"]
 
 def set_document_format(doc):
-    """Configure document layout with correct 2cm margins"""
+    """Configure document layout with correct margins and font"""
     section = doc.sections[0]
     section.page_width = Inches(11.69)
     section.page_height = Inches(8.27)
     
-    # Set margins to 2cm (≈0.79 inches)
-    section.top_margin = Inches(0.79)
-    section.bottom_margin = Inches(0.79)
-    section.left_margin = Inches(0.79)
-    section.right_margin = Inches(0.79)
+    # Set margins to 2cm
+    margins = Inches(0.79)
+    section.top_margin = margins
+    section.bottom_margin = margins
+    section.left_margin = margins
+    section.right_margin = margins
     
     # Set default font
     style = doc.styles['Normal']
@@ -56,9 +57,9 @@ def read_file_content(uploaded_file) -> str:
         raise
 
 def process_rubric(uploaded_file):
-    """Process rubric while preserving original column names"""
+    """Process and validate rubric CSV"""
     try:
-        df = pd.read_csv(uploaded_file, skip_blank_lines=False)
+        df = pd.read_csv(uploaded_file)
         df = df.dropna(how='all', axis=0).reset_index(drop=True)
         df.columns = [col.strip() for col in df.columns]
 
@@ -125,7 +126,7 @@ def calculate_overall_score(rubric_df):
                                         .str.extract(r'(\d+)', expand=False)
                                         .astype(float))
         total = (rubric_df['Numerical Score'] * rubric_df['Weighting']).sum()
-        return min(max(round(total, 1), 0), 100)  # Ensure score stays within 0-100
+        return min(max(round(total, 1), 0), 100)
     except Exception as e:
         st.error(f"Score calculation error: {str(e)}")
         return 0.0
@@ -143,14 +144,15 @@ def generate_feedback_document(rubric_df: pd.DataFrame, overall_comments: str, f
         set_document_format(doc)
         
         # Header
-        doc.add_heading('Student Feedback', 0).alignment = WD_ALIGN_PARAGRAPH.CENTER
+        header = doc.add_heading('Student Feedback', 0)
+        header.alignment = WD_ALIGN_PARAGRAPH.CENTER
         
-        # Student info
+        # Student info table
         info_table = doc.add_table(rows=1, cols=2)
         info_table.style = 'Table Grid'
-        cells = info_table.rows[0].cells
-        cells[0].text = "Student Name:\nSubmission Date:\nCourse:"
-        cells[1].text = "[Name]\n[Date]\n[Course]"
+        info_row = info_table.rows[0].cells
+        info_row[0].text = "Student Name:\nSubmission Date:\nCourse:"
+        info_row[1].text = "[Name]\n[Date]\n[Course]"
 
         # Rubric table
         doc.add_heading('Assessment Rubric', 1)
@@ -177,7 +179,7 @@ def generate_feedback_document(rubric_df: pd.DataFrame, overall_comments: str, f
             cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             cell.paragraphs[0].runs[0].font.bold = True
 
-        # Data rows
+        # Data rows with shading
         for _, row in rubric_df.iterrows():
             new_row = table.add_row().cells
             for i, col in enumerate(cols):
@@ -186,21 +188,27 @@ def generate_feedback_document(rubric_df: pd.DataFrame, overall_comments: str, f
                 if col in ['Criteria Score', 'Brief Comment'] and str(row[col]).strip():
                     add_shading(cell)
 
-        # Overall score
+        # Overall score section
         doc.add_heading('Overall Mark', 1)
         score_para = doc.add_paragraph()
-        score_para.add_run(f"Final Grade: {overall_score}%").bold = True
+        score_run = score_para.add_run(f"Final Grade: {overall_score}%")
+        score_run.bold = True
         score_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         # Feedback sections
-        for section, content in [('Overall Comments', overall_comments), 
-                               ('Feedforward Suggestions', feedforward)]:
+        sections = [
+            ('Overall Comments', overall_comments),
+            ('Feedforward Suggestions', feedforward)
+        ]
+        
+        for section, content in sections:
             doc.add_heading(section, 1)
             if section == 'Feedforward Suggestions':
                 for point in filter(None, content.split('\n')):
                     doc.add_paragraph(point.strip(), style='ListBullet')
             else:
-                doc.add_paragraph(content)
+                p = doc.add_paragraph()
+                p.add_run(content.strip())
 
         buffer = BytesIO()
         doc.save(buffer)
@@ -261,20 +269,31 @@ def main():
                         
                         Required Format:
                         SCORES:
-                        - [Criterion]: [Selected Band], [Score%], [Comment]
+                        - [Criterion Name]: [Selected Band], [Score%], [Comment]
                         OVERALL_COMMENTS:
-                        [Comprehensive evaluation]
+                        [Comprehensive evaluation in 3-5 paragraphs]
                         FEEDFORWARD:
                         - [Actionable suggestion 1]
                         - [Actionable suggestion 2]
+                        - [Actionable suggestion 3]
                         """
                         
-                        user_prompt = f"Submission Content:\n{content[:10000]}\n\nAnalysis Guidelines:\n1. Match exact percentage band descriptors\n2. Provide specific examples from the text\n3. Maintain academic rigor in feedback"
+                        user_prompt = f"""
+                        Submission Content:
+                        {content[:10000]}
+
+                        Analysis Guidelines:
+                        1. Match exact percentage band descriptors
+                        2. Provide specific examples from the text
+                        3. Maintain academic rigor in feedback
+                        4. Use British English spelling
+                        5. Reference university guidelines where appropriate
+                        """
                         
-                        with st.spinner("Analyzing..."):
+                        with st.spinner("Generating detailed feedback..."):
                             response = call_deepseek_api(user_prompt, system_prompt)
                         
-                        # Parse response
+                        # Enhanced response parsing
                         scores = {}
                         sections = {
                             'SCORES:': 'scores',
@@ -298,7 +317,8 @@ def main():
                                         'Brief Comment': comment.strip()
                                     }
                             elif current_section == 'overall':
-                                overall_comments.append(line)
+                                if line:  # Skip empty lines
+                                    overall_comments.append(line)
                             elif current_section == 'feedforward' and line.startswith('-'):
                                 feedforward.append(line[2:].strip())
 
@@ -306,14 +326,16 @@ def main():
                         rubric_df['Criteria Score'] = ''
                         rubric_df['Brief Comment'] = ''
                         for criterion, data in scores.items():
-                            mask = rubric_df['Criteria'].str.strip() == criterion.strip()
+                            mask = rubric_df['Criteria'].str.strip().str.lower() == criterion.strip().lower()
                             if mask.any():
-                                rubric_df.loc[mask, 'Criteria Score'] = data['Criteria Score']
-                                rubric_df.loc[mask, 'Brief Comment'] = data['Brief Comment']
+                                idx = rubric_df[mask].index[0]
+                                rubric_df.at[idx, 'Criteria Score'] = data['Criteria Score']
+                                rubric_df.at[idx, 'Brief Comment'] = data['Brief Comment']
 
-                        # Calculate and display results
+                        # Calculate overall score
                         overall_score = calculate_overall_score(rubric_df)
                         
+                        # Generate document
                         feedback_doc = generate_feedback_document(
                             rubric_df,
                             "\n".join(overall_comments).strip(),
@@ -336,4 +358,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
+    
