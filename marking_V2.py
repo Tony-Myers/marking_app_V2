@@ -187,9 +187,11 @@ def main():
     st.header("Assignment Configuration")
     assignment_task = st.text_area("Assignment Task & Academic Level", height=150)
     
+    
     st.header("Upload Files")
-    rubric_file = st.file_ploader("Rubric (CSV)", type=['csv'])
+    rubric_file = st.file_uploader("Rubric (CSV)", type=['csv'])  # Corrected here
     submissions = st.file_uploader("Student Submissions", type=ALLOWED_EXTENSIONS, accept_multiple_files=True)
+    
     
     if rubric_file and submissions and st.button("Start Marking"):
         try:
