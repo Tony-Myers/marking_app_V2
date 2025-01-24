@@ -49,39 +49,38 @@ def read_file_content(uploaded_file) -> str:
         raise
 
 def process_rubric(uploaded_file):
-    """Process rubric with Criteria Score and Brief Comment columns"""
+    """Process rubric with empty Criteria Score and Brief Comment columns"""
     try:
-        # Read and clean CSV
-        df = pd.read_csv(uploaded_file, skip_blank_lines=True)
-        df = df.dropna(how='all', axis=0).dropna(how='all', axis=1)
+        # Read CSV while preserving empty columns and rows
+        df = pd.read_csv(uploaded_file, skip_blank_lines=False)
+        
+        # Clean column names and validate structure
         df.columns = [col.strip() for col in df.columns]
-
-        # Validate required columns
         required_columns = [
             'Criteria', 'Criteria weighting', '80-100%', '70-79%',
             '60-69%', '50-59%', '40-49%', '0-39%',
             'Criteria Score', 'Brief Comment'
         ]
+        
+        # Check for required columns
         missing = [col for col in required_columns if col not in df.columns]
         if missing:
             raise ValueError(f"Missing columns: {', '.join(missing)}")
-
+        
+        # Clean data without removing empty columns
+        df = df[df['Criteria'].notna()].reset_index(drop=True)
+        df = df[required_columns]  # Maintain original column order
+        
         # Process weighting column
         if df['Criteria weighting'].dtype == object:
             df['Weighting'] = df['Criteria weighting'].str.replace('%', '').astype(float) / 100
         else:
             df['Weighting'] = df['Criteria weighting'].astype(float)
-
+        
         # Validate weighting sum
         total_weight = round(df['Weighting'].sum(), 2)
         if total_weight != 1.0:
             raise ValueError(f"Total weighting must be 100% (current: {total_weight*100}%)")
-
-        # Rename columns to match code expectations
-        df = df.rename(columns={
-            'Criteria Score': 'Score',
-            'Brief Comment': 'Comment'
-        })
         
         return df
 
@@ -89,23 +88,11 @@ def process_rubric(uploaded_file):
         st.error(f"Rubric Error: {str(e)}")
         st.markdown("""
         **Required CSV Format:**
-        - Must contain columns: 
+        - Must maintain all columns even if empty
+        - Preserve exact column names and order:
           Criteria, Criteria weighting, 80-100%, 70-79%, 60-69%, 
           50-59%, 40-49%, 0-39%, Criteria Score, Brief Comment
-        - Example structure:
         """)
-        st.table(pd.DataFrame({
-            'Criteria': ['Theory Application'],
-            'Criteria weighting': ['15%'],
-            '80-100%': ['Excellent...'],
-            '70-79%': ['Good...'],
-            '60-69%': ['Average...'],
-            '50-59%': ['Below average...'],
-            '40-49%': ['Poor...'],
-            '0-39%': ['Very poor...'],
-            'Criteria Score': [''],
-            'Brief Comment': ['']
-        }))
         st.stop()
         raise
 
@@ -137,7 +124,7 @@ def call_deepseek_api(prompt: str, system_prompt: str) -> str:
 def calculate_overall_score(rubric_df):
     """Compute weighted total score"""
     try:
-        rubric_df['Numerical Score'] = rubric_df['Score'].str.extract(r'(\d+)').astype(float)
+        rubric_df['Numerical Score'] = rubric_df['Criteria Score'].str.extract(r'(\d+)').astype(float)
         total = (rubric_df['Numerical Score'] * rubric_df['Weighting']).sum()
         return round(total, 1)
     except Exception as e:
@@ -150,11 +137,11 @@ def generate_feedback_document(rubric_df: pd.DataFrame, overall_comments: str, f
         doc = Document()
         set_document_format(doc)
         
-        # Rubric table
-        doc.add_heading('Assessment Rubric', 1)
+        # Rubric table with original column names
         cols = [
             'Criteria', 'Criteria weighting', '80-100%', '70-79%',
-            '60-69%', '50-59%', '40-49%', '0-39%', 'Score', 'Comment'
+            '60-69%', '50-59%', '40-49%', '0-39%', 
+            'Criteria Score', 'Brief Comment'
         ]
         table = doc.add_table(rows=1, cols=len(cols))
         table.style = 'Table Grid'
@@ -174,8 +161,8 @@ def generate_feedback_document(rubric_df: pd.DataFrame, overall_comments: str, f
                 cell = cells[i]
                 cell.text = str(row[col]) if pd.notna(row[col]) else ''
                 
-                # Apply green highlight to Score/Comment
-                if col in ['Score', 'Comment']:
+                # Apply green highlight to Score/Comment columns
+                if col in ['Criteria Score', 'Brief Comment']:
                     for paragraph in cell.paragraphs:
                         for run in paragraph.runs:
                             run.font.highlight_color = WD_COLOR_INDEX.GREEN
@@ -267,9 +254,9 @@ def main():
                         
                         Analysis Guidelines:
                         1. Match exact percentage band descriptors
-                        2. Provide percentage scores in 'Score' column
-                        3. Reference specific examples from the text
-                        4. Maintain academic standards in comments
+                        2. Provide percentage scores in 'Criteria Score' column
+                        3. Add brief comments in 'Brief Comment' column
+                        4. Reference specific examples from the text
                         """
                         
                         with st.spinner("Analyzing..."):
@@ -295,8 +282,8 @@ def main():
                                     if match:
                                         criterion, band, score, comment = match.groups()
                                         scores[criterion.strip()] = {
-                                            'Score': f"{score}%",
-                                            'Comment': comment.strip()
+                                            'Criteria Score': f"{score}%",
+                                            'Brief Comment': comment.strip()
                                         }
                                 elif current_section == 'overall':
                                     overall_comments.append(line)
@@ -307,8 +294,8 @@ def main():
                         for criterion, data in scores.items():
                             mask = rubric_df['Criteria'] == criterion
                             if mask.any():
-                                rubric_df.loc[mask, 'Score'] = data['Score']
-                                rubric_df.loc[mask, 'Comment'] = data['Comment']
+                                rubric_df.loc[mask, 'Criteria Score'] = data['Criteria Score']
+                                rubric_df.loc[mask, 'Brief Comment'] = data['Brief Comment']
                         
                         # Generate document
                         feedback_doc = generate_feedback_document(
@@ -332,4 +319,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
+    
