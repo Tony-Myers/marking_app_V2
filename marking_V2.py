@@ -6,7 +6,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt, Inches
 from docx.oxml import OxmlElement
 from docx.oxml.ns import nsdecls
-from io import BytesIO
+from io import BytesIO, StringIO  # Added StringIO import
 from PyPDF2 import PdfReader
 import re
 import tiktoken
@@ -163,6 +163,7 @@ def main():
     
     if rubric_file and submissions and st.button("Start Marking"):
         try:
+            # Read and process rubric
             rubric_df = pd.read_csv(rubric_file)
             rubric_df['Criterion'] = rubric_df['Criterion'].astype(str)
             rubric_df['Weight'] = rubric_df['Criterion'].apply(extract_weight)
@@ -181,6 +182,7 @@ def main():
                     text = extract_text_from_docx(submission)
                 
                 if not text:
+                    st.error(f"Failed to extract text from {submission.name}")
                     continue
                 
                 # Truncate if needed
@@ -222,19 +224,33 @@ Feedforward:
                 # API Call
                 response = call_deepseek_api(user_prompt, system_prompt)
                 if not response:
+                    st.error(f"Failed to get response for {student_name}")
                     continue
                 
                 # Parse response
-                csv_part = response.split('Overall Comments:')[0].strip()
-                comments_part = response.split('Overall Comments:')[1].split('Feedforward:')
-                overall_comments = comments_part[0].strip()
-                feedforward = comments_part[1].strip()
+                try:
+                    csv_part = response.split('Overall Comments:')[0].strip()
+                    comments_part = response.split('Overall Comments:')[1].split('Feedforward:')
+                    overall_comments = comments_part[0].strip()
+                    feedforward = comments_part[1].strip()
+                except IndexError:
+                    st.error("Invalid response format from API")
+                    continue
                 
                 # Process scores
                 scores_df = parse_csv_section(csv_part)
-                merged_df = rubric_df.merge(scores_df, on='Criterion', how='left')
-                merged_df['Weighted'] = merged_df['Weight'] * merged_df['Score'] / 100
-                total_mark = merged_df['Weighted'].sum()
+                if scores_df is None:
+                    st.error(f"Failed to parse scores for {student_name}")
+                    continue
+                
+                # Merge dataframes
+                try:
+                    merged_df = rubric_df.merge(scores_df, on='Criterion', how='left')
+                    merged_df['Weighted'] = merged_df['Weight'] * merged_df['Score'] / 100
+                    total_mark = merged_df['Weighted'].sum()
+                except KeyError:
+                    st.error("Missing columns in merged dataframe")
+                    continue
                 
                 # Generate document
                 doc_buffer = generate_feedback_doc(
