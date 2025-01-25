@@ -6,8 +6,8 @@ import tiktoken
 import os
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.section import WD_ORIENT  # Added missing import
-from docx.shared import Pt, Inches
+from docx.enum.section import WD_ORIENT
+from docx.shared import Pt, Inches, RGBColor
 from docx.oxml import OxmlElement
 from docx.oxml.ns import nsdecls
 from io import BytesIO, StringIO
@@ -81,6 +81,7 @@ def parse_csv_section(csv_text):
         if missing:
             st.error(f"Missing columns in CSV: {', '.join(missing)}")
             return None
+        df['score'] = pd.to_numeric(df['score'], errors='coerce')
         return df
     except Exception as e:
         st.error(f"CSV Parse Error: {str(e)}")
@@ -88,25 +89,26 @@ def parse_csv_section(csv_text):
 
 def parse_api_response(response):
     try:
-        normalized = response.replace('\r\n', '\n').lower()
+        # Normalize response format
+        normalized = response.replace('\r\n', '\n')
         
         # Extract CSV section
         csv_match = re.search(
-            r'---csv_start---\s*criterion,score,comment\s*(.*?)\s*---csv_end---',
+            r'---CSV_START---(.*?)---CSV_END---', 
             normalized, 
             re.DOTALL
         )
         
         # Extract comments
         comments_match = re.search(
-            r'---comments_start---\s*overall comments:\s*(.*?)\s*---comments_end---',
+            r'---COMMENTS_START---(.*?)---COMMENTS_END---', 
             normalized, 
             re.DOTALL
         )
         
         # Extract feedforward
         feedforward_match = re.search(
-            r'---feedforward_start---\s*feedforward:\s*(.*?)\s*---feedforward_end---',
+            r'---FEEDFORWARD_START---(.*?)---FEEDFORWARD_END---', 
             normalized, 
             re.DOTALL
         )
@@ -114,10 +116,13 @@ def parse_api_response(response):
         if not all([csv_match, comments_match, feedforward_match]):
             raise ValueError("Missing required sections in response")
 
+        def capitalize_sentences(text):
+            return '. '.join([s.strip().capitalize() for s in text.split('.') if s.strip()])
+
         return {
             'csv': f"Criterion,Score,Comment\n{csv_match.group(1).strip()}",
-            'comments': comments_match.group(1).strip(),
-            'feedforward': feedforward_match.group(1).strip()
+            'comments': capitalize_sentences(comments_match.group(1).replace('Overall Comments:', '').strip()),
+            'feedforward': capitalize_sentences(feedforward_match.group(1).replace('Feedforward:', '').strip())
         }
     except Exception as e:
         st.error(f"Response parsing failed: {str(e)}")
@@ -130,7 +135,7 @@ def extract_weight(criterion_name):
 
 def add_shading(cell):
     shading = OxmlElement('w:shd')
-    shading.set(nsdecls('w'), 'fill', 'D9EAD3')
+    shading.set(nsdecls('w'), 'fill', 'D9EAD3')  # Light green
     cell._tc.get_or_add_tcPr().append(shading)
 
 def generate_feedback_doc(student_name, rubric_df, overall_comments, feedforward, total_mark):
@@ -148,41 +153,52 @@ def generate_feedback_doc(student_name, rubric_df, overall_comments, feedforward
     table = doc.add_table(rows=1, cols=len(rubric_df.columns))
     table.style = 'Table Grid'
     
-    # Header row
+    # Header row formatting
     hdr_cells = table.rows[0].cells
     for i, col in enumerate(rubric_df.columns):
         hdr_cells[i].text = str(col).title()
         hdr_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        hdr_cells[i].paragraphs[0].runs[0].bold = True
     
-    # Data rows with shading
+    # Data rows with conditional formatting
     for _, row in rubric_df.iterrows():
         row_cells = table.add_row().cells
-        for i, value in enumerate(row):
+        for i, (col_name, value) in enumerate(zip(rubric_df.columns, row)):
             cell = row_cells[i]
             cell.text = str(value)
-            if 'score' in str(rubric_df.columns[i]).lower():
+            
+            # Apply green shading for score cells
+            if 'score' in col_name.lower():
                 try:
                     score = float(value)
-                    for range_col in [col for col in rubric_df.columns if '-' in col and '%' in col]:
+                    for range_col in [col for col in rubric_df.columns if '%' in col]:
                         lower, upper = map(float, range_col.replace('%','').split('-'))
                         if lower <= score <= upper:
                             add_shading(cell)
                             break
                 except ValueError:
                     pass
+            
+            # Capitalize comments
+            if 'comment' in col_name.lower():
+                cell.paragraphs[0].runs[0].text = cell.text.capitalize()
     
     # Feedback sections
-    doc.add_heading('Overall Comments', level=1)
-    doc.add_paragraph(overall_comments)
+    doc.add_heading('Overall Comments', level=1).bold = True
+    overall_para = doc.add_paragraph(overall_comments)
+    overall_para.runs[0].font.size = Pt(12)
     
-    doc.add_heading('Feedforward', level=1)
+    doc.add_heading('Feedforward', level=1).bold = True
     for point in feedforward.split('\n'):
-        if point.strip().startswith('-'):
-            doc.add_paragraph(point.strip()[2:], style='ListBullet')
+        if point.strip():
+            p = doc.add_paragraph(style='ListBullet')
+            p.add_run(point.strip().lstrip('- ')).bold = False
     
-    doc.add_heading('Total Mark', level=1)
+    doc.add_heading('Total Mark', level=1).bold = True
     total_para = doc.add_paragraph()
-    total_para.add_run(f"{total_mark:.2f}%").bold = True
+    total_run = total_para.add_run(f"{total_mark:.2f}%")
+    total_run.bold = True
+    total_run.font.color.rgb = RGBColor(0, 128, 0)  # Dark green
     
     buffer = BytesIO()
     doc.save(buffer)
@@ -205,7 +221,7 @@ def main():
     assignment_task = st.text_area("Assignment Task & Academic Level", height=150)
     
     st.header("Upload Files")
-    rubric_file = st.file_uploader("Rubric (CSV)", type=['csv'])  # Fixed typo here
+    rubric_file = st.file_uploader("Rubric (CSV)", type=['csv'])
     submissions = st.file_uploader("Student Submissions", type=ALLOWED_EXTENSIONS, accept_multiple_files=True)
     
     if rubric_file and submissions and st.button("Start Marking"):
@@ -215,7 +231,7 @@ def main():
             rubric_df.columns = rubric_df.columns.str.strip().str.lower()
             rubric_df['criterion'] = rubric_df['criterion'].astype(str)
             rubric_df['weight'] = rubric_df['criterion'].apply(extract_weight)
-            rubric_df['criterion'] = rubric_df['criterion'].apply(lambda x: re.sub(r'\s*\(\d+%\)', '', x).strip())
+            rubric_df['criterion'] = rubric_df['criterion'].apply(lambda x: re.sub(r'\s*\(\d+%\)', '', x).str.strip())
             
             percentage_columns = [col for col in rubric_df.columns if '%' in col]
             criteria_string = '\n'.join(rubric_df['criterion'].tolist())
@@ -297,6 +313,7 @@ Assignment Task:
                 
                 # Merge dataframes
                 try:
+                    scores_df['criterion'] = scores_df['criterion'].str.strip().str.lower()
                     merged_df = rubric_df.merge(
                         scores_df[['criterion', 'score', 'comment']],
                         on='criterion',
