@@ -82,6 +82,7 @@ def parse_csv_section(csv_text):
             st.error(f"Missing columns in CSV: {', '.join(missing)}")
             return None
         df['score'] = pd.to_numeric(df['score'], errors='coerce')
+        df['criterion'] = df['criterion'].str.strip().str.lower()
         return df
     except Exception as e:
         st.error(f"CSV Parse Error: {str(e)}")
@@ -89,7 +90,6 @@ def parse_csv_section(csv_text):
 
 def parse_api_response(response):
     try:
-        # Normalize response format
         normalized = response.replace('\r\n', '\n')
         
         # Extract CSV section
@@ -135,7 +135,7 @@ def extract_weight(criterion_name):
 
 def add_shading(cell):
     shading = OxmlElement('w:shd')
-    shading.set(nsdecls('w'), 'fill', 'D9EAD3')  # Light green
+    shading.set(nsdecls('w'), 'fill', 'D9EAD3')
     cell._tc.get_or_add_tcPr().append(shading)
 
 def generate_feedback_doc(student_name, rubric_df, overall_comments, feedforward, total_mark):
@@ -153,21 +153,20 @@ def generate_feedback_doc(student_name, rubric_df, overall_comments, feedforward
     table = doc.add_table(rows=1, cols=len(rubric_df.columns))
     table.style = 'Table Grid'
     
-    # Header row formatting
+    # Header row
     hdr_cells = table.rows[0].cells
     for i, col in enumerate(rubric_df.columns):
         hdr_cells[i].text = str(col).title()
         hdr_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         hdr_cells[i].paragraphs[0].runs[0].bold = True
     
-    # Data rows with conditional formatting
+    # Data rows with shading
     for _, row in rubric_df.iterrows():
         row_cells = table.add_row().cells
         for i, (col_name, value) in enumerate(zip(rubric_df.columns, row)):
             cell = row_cells[i]
             cell.text = str(value)
             
-            # Apply green shading for score cells
             if 'score' in col_name.lower():
                 try:
                     score = float(value)
@@ -179,26 +178,23 @@ def generate_feedback_doc(student_name, rubric_df, overall_comments, feedforward
                 except ValueError:
                     pass
             
-            # Capitalize comments
             if 'comment' in col_name.lower():
                 cell.paragraphs[0].runs[0].text = cell.text.capitalize()
     
     # Feedback sections
-    doc.add_heading('Overall Comments', level=1).bold = True
-    overall_para = doc.add_paragraph(overall_comments)
-    overall_para.runs[0].font.size = Pt(12)
+    doc.add_heading('Overall Comments', level=1)
+    doc.add_paragraph(overall_comments)
     
-    doc.add_heading('Feedforward', level=1).bold = True
+    doc.add_heading('Feedforward', level=1)
     for point in feedforward.split('\n'):
-        if point.strip():
-            p = doc.add_paragraph(style='ListBullet')
-            p.add_run(point.strip().lstrip('- ')).bold = False
+        if point.strip().startswith('-'):
+            doc.add_paragraph(point.strip()[2:], style='ListBullet')
     
-    doc.add_heading('Total Mark', level=1).bold = True
+    doc.add_heading('Total Mark', level=1)
     total_para = doc.add_paragraph()
     total_run = total_para.add_run(f"{total_mark:.2f}%")
     total_run.bold = True
-    total_run.font.color.rgb = RGBColor(0, 128, 0)  # Dark green
+    total_run.font.color.rgb = RGBColor(0, 128, 0)  # Green color
     
     buffer = BytesIO()
     doc.save(buffer)
@@ -231,7 +227,11 @@ def main():
             rubric_df.columns = rubric_df.columns.str.strip().str.lower()
             rubric_df['criterion'] = rubric_df['criterion'].astype(str)
             rubric_df['weight'] = rubric_df['criterion'].apply(extract_weight)
-            rubric_df['criterion'] = rubric_df['criterion'].apply(lambda x: re.sub(r'\s*\(\d+%\)', '', x).str.strip())
+            
+            # Corrected line with proper string handling
+            rubric_df['criterion'] = rubric_df['criterion'].apply(
+                lambda x: re.sub(r'\s*\(\d+%\)', '', x).strip()
+            )
             
             percentage_columns = [col for col in rubric_df.columns if '%' in col]
             criteria_string = '\n'.join(rubric_df['criterion'].tolist())
@@ -253,7 +253,7 @@ def main():
                 if count_tokens(text) > MAX_TOKENS * 0.6:
                     text = truncate_text(text, int(MAX_TOKENS * 0.6))
                 
-                # Prepare prompts with strict formatting requirements
+                # Prepare prompts
                 system_prompt = f"""You are an experienced UK academic. Provide feedback using:
 - British English spelling
 - Birmingham Newman University guidelines
@@ -313,7 +313,6 @@ Assignment Task:
                 
                 # Merge dataframes
                 try:
-                    scores_df['criterion'] = scores_df['criterion'].str.strip().str.lower()
                     merged_df = rubric_df.merge(
                         scores_df[['criterion', 'score', 'comment']],
                         on='criterion',
