@@ -87,10 +87,14 @@ def parse_csv_section(csv_text):
         df = pd.read_csv(StringIO(csv_text), quotechar='"', skipinitialspace=True)
         df.columns = df.columns.str.strip().str.lower()
         required_columns = {'criterion', 'score', 'comment'}
-        missing = required_columns - set(df.columns)
-        if missing:
-            st.error(f"Missing columns in CSV: {', '.join(missing)}")
+        
+        # Correct set operation
+        missing_columns = required_columns.difference(set(df.columns))
+        
+        if missing_columns:
+            st.error(f"Missing columns in CSV: {', '.join(missing_columns)}")
             return None
+            
         df['score'] = pd.to_numeric(df['score'], errors='coerce')
         return df
     except Exception as e:
@@ -101,7 +105,6 @@ def parse_api_response(response):
     try:
         normalized = response.replace('\r\n', '\n')
         
-        # Extract sections with improved regex
         csv_match = re.search(
             r'(?i)---CSV_START---(.*?)---CSV_END---', 
             normalized, 
@@ -153,16 +156,13 @@ def generate_feedback_doc(student_name, rubric_df, overall_comments, feedforward
     section.page_width = Inches(11.69)
     section.page_height = Inches(8.27)
     
-    # Header with green color
     header = doc.add_heading(f"Feedback for {student_name}", 0)
     header.alignment = WD_ALIGN_PARAGRAPH.CENTER
     header.runs[0].font.color.rgb = RGBColor(0, 128, 0)
     
-    # Rubric Table
     table = doc.add_table(rows=1, cols=len(rubric_df.columns))
     table.style = 'Table Grid'
     
-    # Header row with green background
     hdr_cells = table.rows[0].cells
     for i, col in enumerate(rubric_df.columns):
         hdr_cells[i].text = str(col).title()
@@ -170,7 +170,6 @@ def generate_feedback_doc(student_name, rubric_df, overall_comments, feedforward
         hdr_cells[i].paragraphs[0].runs[0].bold = True
         add_shading(hdr_cells[i])
     
-    # Data rows with conditional formatting
     for _, row in rubric_df.iterrows():
         row_cells = table.add_row().cells
         for i, (col_name, value) in enumerate(zip(rubric_df.columns, row)):
@@ -191,12 +190,8 @@ def generate_feedback_doc(student_name, rubric_df, overall_comments, feedforward
             if 'comment' in col_name.lower():
                 cell.paragraphs[0].runs[0].text = cell.text.capitalize()
     
-    # Feedback sections
-    def add_section(heading, content):
-        doc.add_heading(heading, level=1).runs[0].font.color.rgb = RGBColor(0, 128, 0)
-        doc.add_paragraph(content)
-    
-    add_section('Overall Comments', overall_comments)
+    doc.add_heading('Overall Comments', level=1).runs[0].font.color.rgb = RGBColor(0, 128, 0)
+    doc.add_paragraph(overall_comments)
     
     doc.add_heading('Feedforward', level=1).runs[0].font.color.rgb = RGBColor(0, 128, 0)
     for point in feedforward.split('\n'):
@@ -220,7 +215,6 @@ def main():
     st.set_page_config(page_title="AutoGrader Pro", layout="wide")
     st.title("✏️ Automated Assignment Grading System")
     
-    # Authentication
     if 'authenticated' not in st.session_state:
         password = st.text_input("Enter password:", type="password")
         if st.button("Authenticate") and password == st.secrets["APP_PASSWORD"]:
@@ -232,13 +226,11 @@ def main():
     assignment_task = st.text_area("Assignment Task & Academic Level", height=150)
     
     st.header("Upload Files")
-    # CORRECTED FILE UPLOADER
     rubric_file = st.file_uploader("Rubric (CSV)", type=['csv'])
     submissions = st.file_uploader("Student Submissions", type=ALLOWED_EXTENSIONS, accept_multiple_files=True)
     
     if rubric_file and submissions and st.button("Start Marking"):
         try:
-            # Process rubric
             rubric_df = pd.read_csv(rubric_file)
             rubric_df.columns = rubric_df.columns.str.strip().str.lower()
             rubric_df['criterion'] = rubric_df['criterion'].astype(str)
@@ -253,7 +245,6 @@ def main():
             for submission in submissions:
                 student_name = os.path.splitext(submission.name)[0]
                 
-                # Extract text
                 if submission.type == "application/pdf":
                     text = extract_text_from_pdf(submission)
                 else:
@@ -263,14 +254,16 @@ def main():
                     st.error(f"Failed to extract text from {submission.name}")
                     continue
                 
-                # Enhanced prompt for reference checking
+                if count_tokens(text) > MAX_TOKENS * 0.6:
+                    text = truncate_text(text, int(MAX_TOKENS * 0.6))
+                
                 system_prompt = f"""You are an experienced UK academic. Provide feedback using:
 - British English spelling
 - Birmingham Newman University guidelines
 - Check for reference list existence and Harvard formatting
 - Scores between 0-100
-- 120 word limits for comments
-- Mandatory sections: CSV,Overall Comments, Feedforward"""
+- 150 word limits for comments
+- Mandatory sections: CSV, Overall Comments, Feedforward"""
 
                 user_prompt = f"""
 Generate feedback in EXACTLY this format:
@@ -303,25 +296,21 @@ Rubric Criteria:
 Assignment Task:
 {assignment_task}
 """
-                # API Call
                 response = call_deepseek_api(user_prompt, system_prompt)
                 if not response:
                     continue
                 
-                # Parse response
                 parsed = parse_api_response(response)
                 if not parsed:
                     st.error("Invalid response structure")
                     continue
                 
-                # Process scores
                 scores_df = parse_csv_section(parsed['csv'])
                 if scores_df is None or scores_df.empty:
                     st.error("Invalid scores data - check CSV formatting")
                     st.text_area("Raw CSV Data", parsed['csv'], height=200)
                     continue
                 
-                # Merge dataframes
                 try:
                     merged_df = rubric_df.merge(
                         scores_df[['criterion', 'score', 'comment']],
@@ -334,7 +323,6 @@ Assignment Task:
                     st.error(f"Merge error: {str(e)}")
                     continue
                 
-                # Generate document
                 doc_buffer = generate_feedback_doc(
                     student_name,
                     merged_df[['criterion'] + percentage_columns + ['score', 'comment']],
