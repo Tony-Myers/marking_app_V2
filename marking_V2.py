@@ -59,7 +59,19 @@ def call_deepseek_api(prompt, system_prompt):
 def extract_text_from_docx(file):
     try:
         doc = Document(file)
-        return '\n'.join([para.text for para in doc.paragraphs])
+        full_text = []
+        for element in doc.element.body:
+            if element.tag.endswith('tbl'):
+                # Extract text from tables
+                table = doc.tables[doc.element.body.index(element) - 1]
+                for row in table.rows:
+                    for cell in row.cells:
+                        full_text.append(cell.text)
+            else:
+                # Extract text from paragraphs
+                for para in doc.paragraphs:
+                    full_text.append(para.text)
+        return '\n'.join(full_text)
     except Exception as e:
         st.error(f"DOCX Error: {str(e)}")
         return None
@@ -67,7 +79,10 @@ def extract_text_from_docx(file):
 def extract_text_from_pdf(file):
     try:
         reader = PdfReader(file)
-        return '\n'.join([page.extract_text() for page in reader.pages])
+        text = []
+        for page in reader.pages:
+            text.append(page.extract_text())
+        return '\n'.join(text)
     except Exception as e:
         st.error(f"PDF Error: {str(e)}")
         return None
@@ -92,23 +107,21 @@ def parse_api_response(response):
     try:
         normalized = response.replace('\r\n', '\n')
         
-        # Extract CSV section
+        # Enhanced section parsing with case-insensitive matching
         csv_match = re.search(
-            r'---CSV_START---(.*?)---CSV_END---', 
+            r'(?i)---csv_start---(.*?)---csv_end---', 
             normalized, 
             re.DOTALL
         )
         
-        # Extract comments
         comments_match = re.search(
-            r'---COMMENTS_START---(.*?)---COMMENTS_END---', 
+            r'(?i)---comments_start---(.*?)---comments_end---', 
             normalized, 
             re.DOTALL
         )
         
-        # Extract feedforward
         feedforward_match = re.search(
-            r'---FEEDFORWARD_START---(.*?)---FEEDFORWARD_END---', 
+            r'(?i)---feedforward_start---(.*?)---feedforward_end---', 
             normalized, 
             re.DOTALL
         )
@@ -117,7 +130,8 @@ def parse_api_response(response):
             raise ValueError("Missing required sections in response")
 
         def capitalize_sentences(text):
-            return '. '.join([s.strip().capitalize() for s in text.split('.') if s.strip()])
+            sentences = re.split(r'(?<=[.!?]) +', text)
+            return ' '.join([s.strip().capitalize() for s in sentences if s.strip()])
 
         return {
             'csv': f"Criterion,Score,Comment\n{csv_match.group(1).strip()}",
@@ -135,7 +149,7 @@ def extract_weight(criterion_name):
 
 def add_shading(cell):
     shading = OxmlElement('w:shd')
-    shading.set(nsdecls('w'), 'fill', 'D9EAD3')
+    shading.set(nsdecls('w'), 'fill', 'D9EAD3')  # Light green
     cell._tc.get_or_add_tcPr().append(shading)
 
 def generate_feedback_doc(student_name, rubric_df, overall_comments, feedforward, total_mark):
@@ -145,32 +159,37 @@ def generate_feedback_doc(student_name, rubric_df, overall_comments, feedforward
     section.page_width = Inches(11.69)
     section.page_height = Inches(8.27)
     
-    # Header
+    # Header with green color
     header = doc.add_heading(f"Feedback for {student_name}", 0)
     header.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    header.runs[0].font.color.rgb = RGBColor(0, 128, 0)
     
-    # Rubric Table
+    # Enhanced table formatting
     table = doc.add_table(rows=1, cols=len(rubric_df.columns))
     table.style = 'Table Grid'
     
-    # Header row
+    # Header row with green background
     hdr_cells = table.rows[0].cells
     for i, col in enumerate(rubric_df.columns):
         hdr_cells[i].text = str(col).title()
         hdr_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         hdr_cells[i].paragraphs[0].runs[0].bold = True
+        shading = OxmlElement('w:shd')
+        shading.set(nsdecls('w'), 'fill', 'D9EAD3')
+        hdr_cells[i]._tc.get_or_add_tcPr().append(shading)
     
-    # Data rows with shading
+    # Data rows with conditional formatting
     for _, row in rubric_df.iterrows():
         row_cells = table.add_row().cells
         for i, (col_name, value) in enumerate(zip(rubric_df.columns, row)):
             cell = row_cells[i]
             cell.text = str(value)
             
+            # Apply green shading to matching score ranges
             if 'score' in col_name.lower():
                 try:
                     score = float(value)
-                    for range_col in [col for col in rubric_df.columns if '%' in col]:
+                    for range_col in [col for col in rubric_df.columns if re.match(r'\d+-\d+%', col)]:
                         lower, upper = map(float, range_col.replace('%','').split('-'))
                         if lower <= score <= upper:
                             add_shading(cell)
@@ -178,23 +197,30 @@ def generate_feedback_doc(student_name, rubric_df, overall_comments, feedforward
                 except ValueError:
                     pass
             
+            # Format comments with proper capitalization
             if 'comment' in col_name.lower():
                 cell.paragraphs[0].runs[0].text = cell.text.capitalize()
     
-    # Feedback sections
-    doc.add_heading('Overall Comments', level=1)
+    # Feedback sections with enhanced formatting
+    def add_formatted_heading(doc, text):
+        heading = doc.add_heading(text, level=1)
+        heading.runs[0].font.color.rgb = RGBColor(0, 128, 0)
+        heading.runs[0].bold = True
+    
+    add_formatted_heading(doc, 'Overall Comments')
     doc.add_paragraph(overall_comments)
     
-    doc.add_heading('Feedforward', level=1)
+    add_formatted_heading(doc, 'Feedforward')
     for point in feedforward.split('\n'):
-        if point.strip().startswith('-'):
-            doc.add_paragraph(point.strip()[2:], style='ListBullet')
+        if point.strip():
+            p = doc.add_paragraph(style='ListBullet')
+            p.add_run(point.strip().lstrip('- ')).bold = False
     
-    doc.add_heading('Total Mark', level=1)
+    add_formatted_heading(doc, 'Total Mark')
     total_para = doc.add_paragraph()
     total_run = total_para.add_run(f"{total_mark:.2f}%")
     total_run.bold = True
-    total_run.font.color.rgb = RGBColor(0, 128, 0)  # Green color
+    total_run.font.color.rgb = RGBColor(0, 128, 0)
     
     buffer = BytesIO()
     doc.save(buffer)
@@ -222,24 +248,22 @@ def main():
     
     if rubric_file and submissions and st.button("Start Marking"):
         try:
-            # Process rubric
+            # Enhanced rubric processing
             rubric_df = pd.read_csv(rubric_file)
             rubric_df.columns = rubric_df.columns.str.strip().str.lower()
             rubric_df['criterion'] = rubric_df['criterion'].astype(str)
             rubric_df['weight'] = rubric_df['criterion'].apply(extract_weight)
-            
-            # Corrected line with proper string handling
             rubric_df['criterion'] = rubric_df['criterion'].apply(
-                lambda x: re.sub(r'\s*\(\d+%\)', '', x).strip()
+                lambda x: re.sub(r'\s*\(\d+%\)', '', x).strip().lower()
             )
             
-            percentage_columns = [col for col in rubric_df.columns if '%' in col]
+            percentage_columns = [col for col in rubric_df.columns if re.match(r'\d+-\d+%', col)]
             criteria_string = '\n'.join(rubric_df['criterion'].tolist())
             
             for submission in submissions:
                 student_name = os.path.splitext(submission.name)[0]
                 
-                # Extract text
+                # Enhanced text extraction
                 if submission.type == "application/pdf":
                     text = extract_text_from_pdf(submission)
                 else:
@@ -253,13 +277,14 @@ def main():
                 if count_tokens(text) > MAX_TOKENS * 0.6:
                     text = truncate_text(text, int(MAX_TOKENS * 0.6))
                 
-                # Prepare prompts
+                # Enhanced system prompt for reference checking
                 system_prompt = f"""You are an experienced UK academic. Provide feedback using:
 - British English spelling
 - Birmingham Newman University guidelines
 - Strict CSV format with Criterion,Score,Comment columns
 - Scores between 0-100
 - 150 word limits for comments
+- Check for reference list existence and formatting
 - Mandatory sections: CSV, Overall Comments, Feedforward"""
 
                 user_prompt = f"""
@@ -311,7 +336,7 @@ Assignment Task:
                     st.text_area("Raw CSV Data", parsed['csv'], height=200)
                     continue
                 
-                # Merge dataframes
+                # Enhanced dataframe merging
                 try:
                     merged_df = rubric_df.merge(
                         scores_df[['criterion', 'score', 'comment']],
