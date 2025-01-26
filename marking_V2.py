@@ -89,7 +89,7 @@ def parse_csv_section(csv_text):
         required_columns = {'criterion', 'score', 'comment'}
         
         # Correct set operation
-        missing_columns = required_columns.difference(set(df.columns))
+        missing_columns = required_columns.difference(df.columns)
         
         if missing_columns:
             st.error(f"Missing columns in CSV: {', '.join(missing_columns)}")
